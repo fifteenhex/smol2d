@@ -2,6 +2,7 @@
 #define __SMOL2D_H
 
 #include <stdint.h>
+#include <string.h>
 
 struct smol2d_tex {
 	unsigned int w, h;
@@ -71,5 +72,45 @@ int smol2d_present(void *backend_cntx);
 
 /* Pack up and go home */
 void smol2d_close(void *backend_cntx);
+
+/* Helpers */
+
+static inline void smol2d_c8_blit(uint8_t *dst, unsigned int dstw, unsigned int dsth,
+				  const uint8_t *src, unsigned int srcw, unsigned int srch,
+				  unsigned int x, unsigned int y, int key)
+{
+	unsigned int w, h, row, col;
+
+	if (x >= dstw || y >= dsth)
+		return;
+
+	w = srcw < dstw - x ? srcw : dstw - x;
+	h = srch < dsth - y ? srch : dsth - y;
+
+	for (row = 0; row < h; row++) {
+		const uint8_t *from = src + (size_t)row * srcw;
+		uint8_t *to = dst + (size_t)(y + row) * dstw + x;
+
+		if (key < 0) {
+			memcpy(to, from, w);
+			continue;
+		}
+
+		for (col = 0; col < w; col++) {
+			if (from[col] != (uint8_t)key)
+				to[col] = from[col];
+		}
+	}
+}
+
+static inline void smol2d_c8_copy(void *dst, unsigned int dstpitch,
+				  const uint8_t *src, unsigned int w, unsigned int h)
+{
+	unsigned int row;
+
+	for (row = 0; row < h; row++)
+		memcpy((uint8_t *)dst + (size_t)row * dstpitch,
+		       src + (size_t)row * w, w);
+}
 
 #endif /* __SMOL2D_H */
