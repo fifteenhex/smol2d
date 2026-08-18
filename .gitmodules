@@ -1,0 +1,3 @@
+[submodule "smoldrm"]
+	path = smoldrm
+	url = https://github.com/fifteenhex/smoldrm.git
