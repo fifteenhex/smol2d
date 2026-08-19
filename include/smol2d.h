@@ -72,6 +72,9 @@ int smol2d_tex_renderto(void *backend_cntx, struct smol2d_tex *tex, struct smol2
 
 int smol2d_present(void *backend_cntx);
 
+/* 0 == non-blocking  */
+int smol2d_waitkey(void *backend_cntx, unsigned int timeout);
+
 /* Pack up and go home */
 void smol2d_close(void *backend_cntx);
 

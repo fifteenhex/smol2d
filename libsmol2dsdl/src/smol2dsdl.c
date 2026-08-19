@@ -248,16 +248,63 @@ int smol2d_tex_renderto(void *backend_cntx, struct smol2d_tex *tex, struct smol2
 	return 0;
 }
 
-static void pumpevents(struct sdl_backend *be)
+static bool takeevent(struct sdl_backend *be, const SDL_Event *event)
+{
+	if (event->type == SDL_EVENT_QUIT ||
+	    event->type == SDL_EVENT_WINDOW_CLOSE_REQUESTED)
+		be->closing = true;
+
+	if (event->type != SDL_EVENT_KEY_DOWN)
+		return false;
+
+	if (event->key.key == SDLK_ESCAPE)
+		be->closing = true;
+
+	return true;
+}
+
+static bool drainevents(struct sdl_backend *be)
 {
 	SDL_Event event;
+	bool key = false;
 
-	while (SDL_PollEvent(&event)) {
-		if (event.type == SDL_EVENT_QUIT ||
-		    event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED ||
-		    (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE))
-			be->closing = true;
+	SDL_PumpEvents();
+
+	while (SDL_PeepEvents(&event, 1, SDL_GETEVENT,
+			      SDL_EVENT_FIRST, SDL_EVENT_LAST) > 0)
+		key |= takeevent(be, &event);
+
+	return key;
+}
+
+static void pumpevents(struct sdl_backend *be)
+{
+	drainevents(be);
+}
+
+int smol2d_waitkey(void *backend_cntx, unsigned int timeout)
+{
+	struct sdl_backend *be = backend_cntx;
+	SDL_Event event;
+	bool key;
+
+	if (!be)
+		return -1;
+
+	key = drainevents(be);
+
+	if (key || !timeout)
+		return key;
+
+	while (SDL_WaitEventTimeout(&event, (Sint32)timeout)) {
+		if (takeevent(be, &event))
+			return 1;
+
+		if (be->closing)
+			break;
 	}
+
+	return 0;
 }
 
 int smol2d_present(void *backend_cntx)

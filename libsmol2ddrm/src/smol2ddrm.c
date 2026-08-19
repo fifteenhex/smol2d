@@ -261,6 +261,14 @@ int smol2d_tex_renderto(void *backend_cntx, struct smol2d_tex *tex, struct smol2
 	return 0;
 }
 
+/* stub */
+int smol2d_waitkey(void *backend_cntx, unsigned int timeout)
+{
+	(void)timeout;
+
+	return backend_cntx ? 0 : -1;
+}
+
 int smol2d_present(void *backend_cntx)
 {
 	struct drm_backend *be = backend_cntx;

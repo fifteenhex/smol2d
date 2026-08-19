@@ -44,16 +44,14 @@ int main(void)
 		return 1;
 	}
 
-	if (smol2d_tex_clear(backend_cntx, backbuffer, &blue)) {
-		fprintf(stderr, "could not clear the frame\n");
-		smol2d_close(backend_cntx);
-		return 1;
-	}
+	while (!smol2d_waitkey(backend_cntx, 0)) {
+		if (smol2d_tex_clear(backend_cntx, backbuffer, &blue)) {
+			smol2d_close(backend_cntx);
+			return 1;
+		}
 
-	if (smol2d_present(backend_cntx)) {
-		fprintf(stderr, "could not present\n");
-		smol2d_close(backend_cntx);
-		return 1;
+		if (smol2d_present(backend_cntx))
+			break;
 	}
 
 	smol2d_close(backend_cntx);
