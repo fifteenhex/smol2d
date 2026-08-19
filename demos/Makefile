@@ -7,8 +7,15 @@ DRM_BACKEND = ../libsmol2ddrm/libsmol2ddrm.a
 DRM_BACKEND_NOLIBC = ../libsmol2ddrm/libsmol2ddrm_nolibc.a
 
 SOURCES = $(wildcard *.c)
-DEMOS = $(patsubst %.c,%_sdl,$(SOURCES)) $(patsubst %.c,%_drm,$(SOURCES))
+SDL_DEMOS = $(patsubst %.c,%_sdl,$(SOURCES))
+DRM_DEMOS = $(patsubst %.c,%_drm,$(SOURCES))
 NOLIBC_DEMOS = $(patsubst %.c,%_drm_nolibc,$(SOURCES))
+
+DEMOS = $(DRM_DEMOS)
+
+ifdef HAVE_SDL
+DEMOS += $(SDL_DEMOS)
+endif
 
 ifdef NOLIBCDIR
 DEMOS += $(NOLIBC_DEMOS)
@@ -28,4 +35,4 @@ ifdef NOLIBCDIR
 endif
 
 clean:
-	rm -f $(DEMOS) $(NOLIBC_DEMOS)
+	rm -f $(SDL_DEMOS) $(DRM_DEMOS) $(NOLIBC_DEMOS)

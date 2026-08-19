@@ -9,3 +9,7 @@ endif
 endif
 
 PKG_CONFIG ?= pkg-config
+
+# No pkg-config, or no sdl3 to find with it, means no sdl backend. Cross
+# compiling usually has neither.
+HAVE_SDL := $(shell $(PKG_CONFIG) --exists sdl3 2>/dev/null && echo y)
