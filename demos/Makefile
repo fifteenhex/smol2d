@@ -1,7 +1,8 @@
+include ../toolchain.mk
 include ../nolibc.mk
 
 SDL_BACKEND = ../libsmol2dsdl/libsmol2dsdl.a
-SDL_LIBS = $(shell pkg-config --libs sdl3)
+SDL_LIBS = $(shell $(PKG_CONFIG) --libs sdl3)
 DRM_BACKEND = ../libsmol2ddrm/libsmol2ddrm.a
 DRM_BACKEND_NOLIBC = ../libsmol2ddrm/libsmol2ddrm_nolibc.a
 

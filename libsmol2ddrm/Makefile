@@ -1,3 +1,4 @@
+include ../toolchain.mk
 include ../nolibc.mk
 
 CFLAGS += -I../include -I../smoldrm -O2
