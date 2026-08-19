@@ -199,6 +199,15 @@ static inline void smol2d_c8_fill_masked(uint8_t *dst, unsigned int dstw, unsign
 	if (h > dsth - (unsigned int)y)
 		h = dsth - (unsigned int)y;
 
+	if (!mask && w == 1) {
+		uint8_t *to = dst + (size_t)((unsigned int)y) * dststride + (unsigned int)x;
+
+		for (row = 0; row < h; row++, to += dststride)
+			*to = index;
+
+		return;
+	}
+
 	for (row = 0; row < h; row++) {
 		unsigned int dy = (unsigned int)y + row;
 		uint8_t *to = dst + (size_t)dy * dststride + (unsigned int)x;
