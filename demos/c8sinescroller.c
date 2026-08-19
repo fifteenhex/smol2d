@@ -10,6 +10,11 @@
 
 #define SINESTEPS	64
 #define SINESHIFT	2
+#define SINEMAX		48
+
+#define ENVSHIFT	1
+#define AMPMIN		12
+#define AMPMAX		48
 
 #define WAVESPEED	128
 #define FRAMERATE	60
@@ -47,8 +52,13 @@ static void makewave(struct smol2d_mask *mask, unsigned int phase)
 	memset(mask->bits, 0, (size_t)mask->stride * mask->h);
 
 	for (x = 0; x < mask->w; x++) {
+		unsigned int step = (x + phase) >> SINESHIFT;
+		unsigned int envstep = (x - phase / 2) >> (SINESHIFT + ENVSHIFT);
+		int amp = (AMPMAX + AMPMIN) / 2 +
+			  sinetable[envstep & (SINESTEPS - 1)] *
+			  ((AMPMAX - AMPMIN) / 2) / SINEMAX;
 		int top = (int)(mask->h / 2) +
-			  sinetable[((x + phase) >> SINESHIFT) & (SINESTEPS - 1)];
+			  sinetable[step & (SINESTEPS - 1)] * amp / SINEMAX;
 
 		if (top < 0)
 			top = 0;
