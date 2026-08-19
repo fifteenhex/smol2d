@@ -406,6 +406,42 @@ static bool drainevents(struct sdl_backend *be)
 }
 
 /*
+ * A source rectangle of nothing means the whole texture. Whatever it says, it
+ * has to be inside the texture: a pipeline that would read past the end of one
+ * is refused when it is made ready rather than when it runs.
+ */
+static int resolvefrom(struct smol2d_rect *to, const struct smol2d_rect *from,
+		       unsigned int w, unsigned int h)
+{
+	if (!from->w || !from->h) {
+		to->x = 0;
+		to->y = 0;
+		to->w = w;
+		to->h = h;
+		return 0;
+	}
+
+	if (from->x < 0 || from->y < 0 ||
+	    (unsigned int)from->x + from->w > w || (unsigned int)from->y + from->h > h)
+		return -1;
+
+	*to = *from;
+	return 0;
+}
+
+/* Read back rather than remembered, so setting a key later still takes */
+static int texkey(const struct sdl_tex *tex)
+{
+	Uint32 key;
+
+	if (!SDL_SurfaceHasColorKey(tex->surface) ||
+	    !SDL_GetSurfaceColorKey(tex->surface, &key))
+		return -1;
+
+	return (int)key;
+}
+
+/*
  * A made ready pipeline. The op list is copied in and what the backend can
  * settle in advance is settled here: where each target's pixels are, how big
  * it is and how long a row is. Running it does none of that again, so a frame
@@ -420,6 +456,12 @@ struct pipeline_op {
 	unsigned int w, h;
 	unsigned int stride;
 	const SDL_Surface *surface;	/* only so show can tell targets apart */
+
+	/* blits: where the source is and which part of it is wanted */
+	const struct sdl_tex *srctex;
+	const uint8_t *src;
+	unsigned int srcstride;
+	struct smol2d_rect from;
 };
 
 struct smol2d_pipeline {
@@ -455,21 +497,43 @@ int smol2d_pipeline_create(void *backend_cntx, const struct smol2d_op *ops,
 	for (i = 0; i < nops; i++) {
 		const struct sdl_tex *dst = (const struct sdl_tex *)ops[i].dst;
 
-		if (ops[i].type != SMOL2D_OP_FILL || !dst ||
-		    SDL_MUSTLOCK(dst->surface)) {
-			smol2d_pipeline_destroy(backend_cntx, p);
-			return -1;
-		}
+		if (!dst || SDL_MUSTLOCK(dst->surface))
+			goto err;
 
 		p->ready[i].pixels = dst->surface->pixels;
 		p->ready[i].w = (unsigned int)dst->surface->w;
 		p->ready[i].h = (unsigned int)dst->surface->h;
 		p->ready[i].stride = (unsigned int)dst->surface->pitch;
 		p->ready[i].surface = dst->surface;
+
+		switch (ops[i].type) {
+		case SMOL2D_OP_FILL:
+			break;
+		case SMOL2D_OP_BLIT: {
+			const struct sdl_tex *src = (const struct sdl_tex *)ops[i].blit.src;
+
+			if (!src || SDL_MUSTLOCK(src->surface) ||
+			    resolvefrom(&p->ready[i].from, &ops[i].blit.from,
+					(unsigned int)src->surface->w,
+					(unsigned int)src->surface->h))
+				goto err;
+
+			p->ready[i].srctex = src;
+			p->ready[i].src = src->surface->pixels;
+			p->ready[i].srcstride = (unsigned int)src->surface->pitch;
+			break;
+		}
+		default:
+			goto err;
+		}
 	}
 
 	*pipeline = p;
 	return 0;
+
+err:
+	smol2d_pipeline_destroy(backend_cntx, p);
+	return -1;
 }
 
 struct smol2d_op *smol2d_pipeline_params(struct smol2d_pipeline *pipeline, unsigned int op)
@@ -492,18 +556,36 @@ int smol2d_pipeline_run(void *backend_cntx, struct smol2d_pipeline *pipeline)
 		const struct smol2d_op *op = &pipeline->ops[i];
 		const struct pipeline_op *ready = &pipeline->ready[i];
 
-		if (!op->fill.rect.w || !op->fill.rect.h)
-			continue;
+		switch (op->type) {
+		case SMOL2D_OP_FILL:
+			if (!op->fill.rect.w || !op->fill.rect.h)
+				continue;
 
-		smol2d_c8_fill_masked(ready->pixels, ready->w, ready->h, ready->stride,
-				      op->fill.rect.x, op->fill.rect.y,
-				      op->fill.rect.w, op->fill.rect.h,
-				      op->fill.colour.indexed.index, NULL);
+			smol2d_c8_fill_masked(ready->pixels, ready->w, ready->h, ready->stride,
+					      op->fill.rect.x, op->fill.rect.y,
+					      op->fill.rect.w, op->fill.rect.h,
+					      op->fill.colour.indexed.index, op->mask);
 
-		if (be->show)
-			show_call(be->show, ready->surface, SHOW_FILL,
+			show_call(be->show, ready->surface,
+				  op->mask ? SHOW_MASK : SHOW_FILL,
 				  op->fill.rect.x, op->fill.rect.y,
 				  op->fill.rect.w, op->fill.rect.h);
+			break;
+
+		case SMOL2D_OP_BLIT:
+			smol2d_c8_blit_masked(ready->pixels, ready->w, ready->h, ready->stride,
+					      ready->src, ready->srcstride,
+					      (unsigned int)ready->from.x,
+					      (unsigned int)ready->from.y,
+					      ready->from.w, ready->from.h,
+					      op->blit.x, op->blit.y, texkey(ready->srctex),
+					      op->blit.flip, op->rop, op->mask);
+
+			show_call(be->show, ready->surface,
+				  op->mask ? SHOW_MASK : SHOW_BLIT,
+				  op->blit.x, op->blit.y, ready->from.w, ready->from.h);
+			break;
+		}
 	}
 
 	return 0;

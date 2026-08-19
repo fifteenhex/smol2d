@@ -10,9 +10,21 @@ struct smol2d_tex {
 	unsigned int w, h;
 };
 
+struct smol2d_rect {
+	int x, y;
+	unsigned int w, h;
+};
+
+/*
+ * Positions are signed: sprites come in from the left and the top, and a
+ * source rectangle picks a frame out of a sheet rather than needing a texture
+ * per frame. A zero sized source rectangle means the whole texture.
+ */
 struct smol2d_sprite {
 	struct smol2d_tex *tex;
-	unsigned int x, y;
+	struct smol2d_rect from;
+	int x, y;
+	unsigned int flip;
 };
 
 struct smol2d_colour_chunky {
@@ -34,11 +46,6 @@ struct smol2d_palette {
 	struct smol2d_colour_chunky colours[256];
 };
 
-struct smol2d_rect {
-	int x, y;
-	unsigned int w, h;
-};
-
 struct smol2d_mask {
 	unsigned int w, h;
 	unsigned int stride;
@@ -49,6 +56,22 @@ struct smol2d_drawlist {
 	struct smol2d_sprite **sprites;
 	unsigned int nsprites;
 };
+
+/*
+ * How a source pixel is combined with the one already there. Only the useful
+ * few rather than all the minterms an Amiga blitter can do; XOR is worth
+ * having on its own, since it is how a cursor or a rubber band is drawn and
+ * undrawn without keeping a copy of the background.
+ */
+enum smol2d_rop {
+	SMOL2D_ROP_COPY,
+	SMOL2D_ROP_AND,
+	SMOL2D_ROP_OR,
+	SMOL2D_ROP_XOR,
+};
+
+#define SMOL2D_FLIP_X	(1u << 0)
+#define SMOL2D_FLIP_Y	(1u << 1)
 
 enum smol2d_colourspace {
 	/* 8bit indexed colour */
@@ -99,17 +122,27 @@ int smol2d_present(void *backend_cntx);
  */
 enum smol2d_optype {
 	SMOL2D_OP_FILL,
+	SMOL2D_OP_BLIT,
 };
 
 struct smol2d_op {
 	enum smol2d_optype type;		/* structural */
 	struct smol2d_tex *dst;			/* structural */
+	const struct smol2d_mask *mask;		/* structural, none if null */
+	enum smol2d_rop rop;			/* structural */
 
 	union {
 		struct {
 			struct smol2d_rect rect;	/* dynamic */
 			struct smol2d_colour colour;	/* dynamic */
 		} fill;
+
+		struct {
+			struct smol2d_tex *src;		/* structural */
+			struct smol2d_rect from;	/* structural */
+			unsigned int flip;		/* structural */
+			int x, y;			/* dynamic */
+		} blit;
 	};
 };
 
@@ -133,31 +166,18 @@ void smol2d_close(void *backend_cntx);
 
 /* Helpers */
 
-static inline void smol2d_c8_blit(uint8_t *dst, unsigned int dstw, unsigned int dsth,
-				  const uint8_t *src, unsigned int srcw, unsigned int srch,
-				  unsigned int x, unsigned int y, int key)
+static inline uint8_t smol2d_c8_combine(uint8_t was, uint8_t with, enum smol2d_rop rop)
 {
-	unsigned int w, h, row, col;
-
-	if (x >= dstw || y >= dsth)
-		return;
-
-	w = srcw < dstw - x ? srcw : dstw - x;
-	h = srch < dsth - y ? srch : dsth - y;
-
-	for (row = 0; row < h; row++) {
-		const uint8_t *from = src + (size_t)row * srcw;
-		uint8_t *to = dst + (size_t)(y + row) * dstw + x;
-
-		if (key < 0) {
-			memcpy(to, from, w);
-			continue;
-		}
-
-		for (col = 0; col < w; col++) {
-			if (from[col] != (uint8_t)key)
-				to[col] = from[col];
-		}
+	switch (rop) {
+	case SMOL2D_ROP_AND:
+		return was & with;
+	case SMOL2D_ROP_OR:
+		return was | with;
+	case SMOL2D_ROP_XOR:
+		return was ^ with;
+	case SMOL2D_ROP_COPY:
+	default:
+		return with;
 	}
 }
 
@@ -168,6 +188,94 @@ static inline int smol2d_mask_bit(const struct smol2d_mask *mask,
 		return 0;
 
 	return mask->bits[(size_t)y * mask->stride + x / 8] & (0x80u >> (x % 8));
+}
+
+/*
+ * The general blit: a rectangle of a source texture onto a destination, with
+ * an optional colour key, an optional mask in destination coordinates, either
+ * flip, and a raster op. Everything else is this with the arms it does not
+ * need turned off.
+ *
+ * Flipping mirrors within the source rectangle, so the clipping has to be
+ * counted in source columns and rows rather than folded into a pointer: a
+ * sprite half off the left edge with FLIP_X showing has to drop the pixels
+ * from the far end of its image, not the near one.
+ */
+static inline void smol2d_c8_blit_masked(uint8_t *dst, unsigned int dstw, unsigned int dsth,
+					 unsigned int dststride,
+					 const uint8_t *src, unsigned int srcstride,
+					 unsigned int sx, unsigned int sy,
+					 unsigned int sw, unsigned int sh,
+					 int x, int y, int key, unsigned int flip,
+					 enum smol2d_rop rop, const struct smol2d_mask *mask)
+{
+	unsigned int skipx = 0, skipy = 0, w = sw, h = sh, row, col;
+
+	if (!sw || !sh)
+		return;
+
+	if (x < 0) {
+		if ((unsigned int)-x >= w)
+			return;
+		skipx = (unsigned int)-x;
+		w -= skipx;
+		x = 0;
+	}
+
+	if (y < 0) {
+		if ((unsigned int)-y >= h)
+			return;
+		skipy = (unsigned int)-y;
+		h -= skipy;
+		y = 0;
+	}
+
+	if ((unsigned int)x >= dstw || (unsigned int)y >= dsth)
+		return;
+
+	if (w > dstw - (unsigned int)x)
+		w = dstw - (unsigned int)x;
+	if (h > dsth - (unsigned int)y)
+		h = dsth - (unsigned int)y;
+
+	for (row = 0; row < h; row++) {
+		unsigned int dy = (unsigned int)y + row;
+		unsigned int srow = skipy + row;
+		const uint8_t *from;
+		uint8_t *to = dst + (size_t)dy * dststride + (unsigned int)x;
+
+		if (flip & SMOL2D_FLIP_Y)
+			srow = sh - 1 - srow;
+
+		from = src + (size_t)(sy + srow) * srcstride + sx;
+
+		for (col = 0; col < w; col++) {
+			unsigned int scol = skipx + col;
+			uint8_t pixel;
+
+			if (flip & SMOL2D_FLIP_X)
+				scol = sw - 1 - scol;
+
+			pixel = from[scol];
+
+			if (key >= 0 && pixel == (uint8_t)key)
+				continue;
+
+			if (mask && !smol2d_mask_bit(mask, (unsigned int)x + col, dy))
+				continue;
+
+			to[col] = smol2d_c8_combine(to[col], pixel, rop);
+		}
+	}
+}
+
+/* The plain one: whole texture, no mask, no flip, straight copy */
+static inline void smol2d_c8_blit(uint8_t *dst, unsigned int dstw, unsigned int dsth,
+				  const uint8_t *src, unsigned int srcw, unsigned int srch,
+				  unsigned int x, unsigned int y, int key)
+{
+	smol2d_c8_blit_masked(dst, dstw, dsth, dstw, src, srcw, 0, 0, srcw, srch,
+			      (int)x, (int)y, key, 0, SMOL2D_ROP_COPY, NULL);
 }
 
 static inline void smol2d_c8_fill_masked(uint8_t *dst, unsigned int dstw, unsigned int dsth,
