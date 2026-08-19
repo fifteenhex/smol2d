@@ -14,7 +14,8 @@
  * SMOL2D_SHOW=step:16		stop every 16 drawing calls
  * SMOL2D_SHOW_DELAY=<ms>	how long to hold each stop, 60 by default
  *
- * Space pauses, right arrow takes one step; neither reaches the app.
+ * Space pauses and the right arrow takes one step; d and o turn the damage and
+ * op boxes off and on. None of those four reach the app.
  */
 
 struct show;
@@ -24,6 +25,7 @@ enum show_kind {
 	SHOW_FILL,
 	SHOW_BLIT,
 	SHOW_LOAD,
+	SHOW_MASK,	/* went through a mask, so it covers far more than it moves */
 };
 
 /*
@@ -35,7 +37,7 @@ struct show *show_open(SDL_Surface *target, bool (*pump)(void *cntx), void *cntx
 void show_close(struct show *show);
 
 void show_call(struct show *show, const SDL_Surface *dst, enum show_kind kind,
-	       int x, int y, unsigned int w, unsigned int h, uint8_t index);
+	       int x, int y, unsigned int w, unsigned int h);
 void show_present(struct show *show);
 
 /* True if the event was for show and the app should not hear about it */

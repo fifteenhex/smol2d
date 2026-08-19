@@ -17,6 +17,8 @@
  */
 #define MAXDAMAGE	256
 
+#define MAXOPS		1024	/* op boxes kept for a frame before they stop being drawn */
+
 #define DIM		56	/* how much of the frame shows through the trace */
 
 #define DEFAULT_DELAY	60
@@ -29,7 +31,9 @@ struct show {
 
 	SDL_Surface *target;		/* what the app draws into */
 	SDL_Surface *frame;		/* the same thing in colour, as it stands */
-	SDL_Surface *trace;		/* what this frame has touched, over a dimmed copy */
+	SDL_Surface *trace;		/* what this frame changed, over a dimmed copy */
+	uint8_t *before;		/* the target as it was, to tell what changed */
+	Uint32 lut[256];		/* the palette, ready to write into the trace */
 	unsigned int w, h;
 
 	unsigned int step;		/* calls between stops, 0 to only stop at present */
@@ -38,6 +42,8 @@ struct show {
 
 	bool paused;
 	bool onestep;
+	bool nodamage;			/* the red boxes, off with d */
+	bool noops;			/* the op boxes, off with o */
 	bool gone;			/* the window was closed, carry on without it */
 
 	bool (*pump)(void *cntx);
@@ -46,7 +52,11 @@ struct show {
 	/* this frame */
 	unsigned int calls;
 	unsigned int offscreen;
-	unsigned long covered;
+	unsigned long covered;		/* what the ops went over */
+	unsigned long changed;		/* what actually came out different */
+	SDL_Rect ops[MAXOPS];
+	enum show_kind opkinds[MAXOPS];
+	unsigned int nops;
 	SDL_Rect damage[MAXDAMAGE];
 	unsigned int ndamage;
 	unsigned long damaged;
@@ -77,6 +87,37 @@ static void wholeframe(struct show *s)
 	const SDL_Rect all = { 0, 0, (int)s->w, (int)s->h };
 
 	dirtied(s, &all);
+}
+
+static void buildlut(struct show *s)
+{
+	const SDL_Palette *palette = SDL_GetSurfacePalette(s->target);
+	unsigned int i;
+
+	for (i = 0; i < 256; i++) {
+		const SDL_Color *c = palette && (int)i < palette->ncolors ?
+				     &palette->colors[i] : NULL;
+
+		s->lut[i] = c ? SDL_MapSurfaceRGB(s->trace, c->r, c->g, c->b) :
+			    SDL_MapSurfaceRGB(s->trace, 0xff, 0xff, 0xff);
+	}
+}
+
+/*
+ * Take the target as it stands to be the starting point for the next frame,
+ * along with whatever the palette says now. Anything drawn by a path show does
+ * not see lands here rather than showing up as a change forever after.
+ */
+static void resync(struct show *s)
+{
+	unsigned int y;
+
+	buildlut(s);
+
+	for (y = 0; y < s->h; y++)
+		SDL_memcpy(s->before + (size_t)y * s->w,
+			   (const uint8_t *)s->target->pixels + (size_t)y * s->target->pitch,
+			   s->w);
 }
 
 /*
@@ -167,7 +208,12 @@ struct show *show_open(SDL_Surface *target, bool (*pump)(void *cntx), void *cntx
 	SDL_SetTextureScaleMode(s->frametex, SDL_SCALEMODE_NEAREST);
 	SDL_SetTextureScaleMode(s->tracetex, SDL_SCALEMODE_NEAREST);
 
+	s->before = SDL_malloc((size_t)s->w * s->h);
+	if (!s->before)
+		goto err;
+
 	SDL_BlitSurface(s->target, NULL, s->frame, NULL);
+	resync(s);
 	dimframe(s);
 
 	return s;
@@ -187,6 +233,8 @@ void show_close(struct show *s)
 		SDL_DestroyTexture(s->frametex);
 	if (s->tracetex)
 		SDL_DestroyTexture(s->tracetex);
+	if (s->before)
+		SDL_free(s->before);
 	if (s->frame)
 		SDL_DestroySurface(s->frame);
 	if (s->trace)
@@ -277,43 +325,33 @@ static void damaged(struct show *s, const SDL_Rect *r)
 	}
 }
 
-static void outline(SDL_Surface *into, const SDL_Rect *r, Uint32 colour)
-{
-	const SDL_Rect edges[] = {
-		{ r->x, r->y, r->w, 1 },
-		{ r->x, r->y + r->h - 1, r->w, 1 },
-		{ r->x, r->y, 1, r->h },
-		{ r->x + r->w - 1, r->y, 1, r->h },
-	};
-
-	SDL_FillSurfaceRects(into, edges, SDL_arraysize(edges), colour);
-}
-
 /*
- * Paint goes into the trace in the colour it actually put down, so a frame's
- * worth of drawing reads as itself. Blits are outlined instead of filled,
- * since what matters there is where the thing landed, not what it looks like.
+ * What an op changed, rather than what it went over: a fill through a mask
+ * covers everything inside the clip and moves a handful of pixels, and a blit
+ * with a colour key leaves whatever it saw through. Comparing against the copy
+ * show keeps is the only way to tell the two apart, so the trace gets the
+ * difference and the counters get both numbers.
  */
-static void traced(struct show *s, const SDL_Rect *r, enum show_kind kind, uint8_t index)
+static void traced(struct show *s, const SDL_Rect *r)
 {
-	const SDL_Palette *palette;
+	int x, y;
 
-	if (kind == SHOW_BLIT || kind == SHOW_LOAD) {
-		outline(s->trace, r, kind == SHOW_BLIT ?
-			SDL_MapSurfaceRGB(s->trace, 0x40, 0xff, 0x60) :
-			SDL_MapSurfaceRGB(s->trace, 0x40, 0xe0, 0xff));
-		return;
+	for (y = r->y; y < r->y + r->h; y++) {
+		const uint8_t *now = (const uint8_t *)s->target->pixels +
+				     (size_t)y * s->target->pitch;
+		uint8_t *was = s->before + (size_t)y * s->w;
+		Uint32 *to = (Uint32 *)((uint8_t *)s->trace->pixels +
+					(size_t)y * s->trace->pitch);
+
+		for (x = r->x; x < r->x + r->w; x++) {
+			if (now[x] == was[x])
+				continue;
+
+			was[x] = now[x];
+			to[x] = s->lut[now[x]];
+			s->changed++;
+		}
 	}
-
-	palette = SDL_GetSurfacePalette(s->target);
-	if (palette && index < palette->ncolors) {
-		const SDL_Color *c = &palette->colors[index];
-
-		SDL_FillSurfaceRect(s->trace, r, SDL_MapSurfaceRGB(s->trace, c->r, c->g, c->b));
-		return;
-	}
-
-	SDL_FillSurfaceRect(s->trace, r, SDL_MapSurfaceRGB(s->trace, 0xff, 0xff, 0xff));
 }
 
 static void upload(struct show *s)
@@ -342,16 +380,20 @@ static void line(struct show *s, unsigned int n, const char *text)
 
 static void status(struct show *s)
 {
-	const float full = (float)(s->w * s->h);
+	const unsigned long full = (unsigned long)s->w * s->h;
 	char damage[48];
 	char text[160];
 
 	SDL_SetRenderDrawColor(s->renderer, 0xff, 0xff, 0xff, 0xff);
 	SDL_SetRenderScale(s->renderer, s->textscale, s->textscale);
 
-	SDL_snprintf(text, sizeof(text), "frame %lu  calls %u  covered %lu px (%.2f%% of %ux%u)",
-		     s->frames, s->calls, s->covered,
-		     100.0f * (float)s->covered / full, s->w, s->h);
+	/*
+	 * Both are counted per call, so a pixel painted twice counts twice: it
+	 * is work done, not a share of the screen. The screen is there to
+	 * compare against rather than as something to take a percentage of.
+	 */
+	SDL_snprintf(text, sizeof(text), "frame %lu  calls %u  over %lu px  changed %lu  screen %lu",
+		     s->frames, s->calls, s->covered, s->changed, full);
 	line(s, 0, text);
 
 	if (s->damagedall)
@@ -370,9 +412,32 @@ static void status(struct show *s)
 			     s->offscreen ? "  +offscreen" : "", s->paused ? "  PAUSED" : "");
 	line(s, 1, text);
 
-	line(s, 2, "left: the screen  right: touched, red = damage  [space] [right]");
+	line(s, 2, "yellow ops, cyan masked, red damage   [space] [right] [d] [o]");
 
 	SDL_SetRenderScale(s->renderer, 1, 1);
+}
+
+/*
+ * What each op went over, which is the work it cost whether or not the pixels
+ * came out any different. A fill through a mask is the whole clip, so this is
+ * usually the biggest thing on screen and the point of showing it.
+ */
+static void drawops(struct show *s)
+{
+	const float over = (float)(s->w + SEP);
+	unsigned int i;
+
+	for (i = 0; i < s->nops; i++) {
+		const SDL_FRect box = { over + (float)s->ops[i].x, (float)s->ops[i].y,
+					(float)s->ops[i].w, (float)s->ops[i].h };
+
+		if (s->opkinds[i] == SHOW_MASK)
+			SDL_SetRenderDrawColor(s->renderer, 0x40, 0xe0, 0xff, 0xff);
+		else
+			SDL_SetRenderDrawColor(s->renderer, 0xff, 0xd0, 0x20, 0xff);
+
+		SDL_RenderRect(s->renderer, &box);
+	}
 }
 
 static void drawdamage(struct show *s)
@@ -411,8 +476,12 @@ static void render(struct show *s)
 	SDL_RenderTexture(s->renderer, s->frametex, NULL, &left);
 	SDL_RenderTexture(s->renderer, s->tracetex, NULL, &right);
 
-	/* what the hardware would be told to move, merged as the backend merges it */
-	drawdamage(s);
+	/* what the ops went over, then what the hardware would be told to move */
+	if (!s->noops)
+		drawops(s);
+
+	if (!s->nodamage)
+		drawdamage(s);
 
 	/*
 	 * Where the last call went, so the sweep is visible while stepping. A
@@ -470,7 +539,7 @@ static void stop(struct show *s, bool stopping)
 }
 
 void show_call(struct show *s, const SDL_Surface *dst, enum show_kind kind,
-	       int x, int y, unsigned int w, unsigned int h, uint8_t index)
+	       int x, int y, unsigned int w, unsigned int h)
 {
 	SDL_Rect r = { x, y, (int)w, (int)h };
 
@@ -485,8 +554,14 @@ void show_call(struct show *s, const SDL_Surface *dst, enum show_kind kind,
 		s->covered += (unsigned long)r.w * (unsigned long)r.h;
 
 		SDL_BlitSurface(s->target, &r, s->frame, &r);
-		traced(s, &r, kind, index);
+		traced(s, &r);
 		damaged(s, &r);
+
+		if (s->nops < MAXOPS) {
+			s->ops[s->nops] = r;
+			s->opkinds[s->nops] = kind;
+			s->nops++;
+		}
 
 		s->last = r;
 		s->haslast = true;
@@ -513,12 +588,15 @@ void show_present(struct show *s)
 
 		stop(s, false);
 
+		resync(s);
 		dimframe(s);
 	}
 
 	s->calls = 0;
 	s->offscreen = 0;
 	s->covered = 0;
+	s->changed = 0;
+	s->nops = 0;
 	s->ndamage = 0;
 	s->damaged = 0;
 	s->damagedall = false;
@@ -547,6 +625,12 @@ bool show_key(struct show *s, const SDL_Event *event)
 	case SDLK_RIGHT:
 		s->paused = true;
 		s->onestep = true;
+		return true;
+	case SDLK_D:
+		s->nodamage = !s->nodamage;
+		return true;
+	case SDLK_O:
+		s->noops = !s->noops;
 		return true;
 	}
 

@@ -204,7 +204,7 @@ int smol2d_tex_load(void *backend_cntx, struct smol2d_tex *tex, const uint8_t *p
 
 	if (be)
 		show_call(be->show, sdltex->surface, SHOW_LOAD, 0, 0,
-			  sdltex->tex.w, sdltex->tex.h, 0);
+			  sdltex->tex.w, sdltex->tex.h);
 
 	return 0;
 }
@@ -310,8 +310,8 @@ int smol2d_tex_clear(void *backend_cntx, struct smol2d_tex *tex, const struct sm
 				      colour->indexed.index, be->mask);
 
 		SDL_UnlockSurface(sdltex->surface);
-		show_call(be->show, sdltex->surface, SHOW_CLEAR, rect.x, rect.y,
-			  (unsigned int)rect.w, (unsigned int)rect.h, colour->indexed.index);
+		show_call(be->show, sdltex->surface, SHOW_MASK, rect.x, rect.y,
+			  (unsigned int)rect.w, (unsigned int)rect.h);
 		return 0;
 	}
 
@@ -320,7 +320,7 @@ int smol2d_tex_clear(void *backend_cntx, struct smol2d_tex *tex, const struct sm
 		return fail();
 
 	show_call(be->show, sdltex->surface, SHOW_CLEAR, rect.x, rect.y,
-		  (unsigned int)rect.w, (unsigned int)rect.h, colour->indexed.index);
+		  (unsigned int)rect.w, (unsigned int)rect.h);
 	return 0;
 }
 
@@ -366,7 +366,7 @@ int smol2d_tex_renderto(void *backend_cntx, struct smol2d_tex *tex, struct smol2
 			return fail();
 
 		show_call(be->show, sdltex->surface, SHOW_BLIT, dstrect.x, dstrect.y,
-			  (unsigned int)dstrect.w, (unsigned int)dstrect.h, 0);
+			  (unsigned int)dstrect.w, (unsigned int)dstrect.h);
 	}
 
 	return 0;
@@ -503,8 +503,7 @@ int smol2d_pipeline_run(void *backend_cntx, struct smol2d_pipeline *pipeline)
 		if (be->show)
 			show_call(be->show, ready->surface, SHOW_FILL,
 				  op->fill.rect.x, op->fill.rect.y,
-				  op->fill.rect.w, op->fill.rect.h,
-				  op->fill.colour.indexed.index);
+				  op->fill.rect.w, op->fill.rect.h);
 	}
 
 	return 0;
