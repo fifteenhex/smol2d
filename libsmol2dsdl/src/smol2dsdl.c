@@ -15,6 +15,8 @@ struct sdl_backend {
 	SDL_Window *window;
 	struct sdl_tex backbuffer;
 	SDL_Palette *palette;
+	struct smol2d_rect clip;
+	bool hasclip;
 	bool closing;
 };
 
@@ -190,15 +192,38 @@ int smol2d_tex_load(void *backend_cntx, struct smol2d_tex *tex, const uint8_t *p
 	return 0;
 }
 
+int smol2d_setclip(void *backend_cntx, const struct smol2d_rect *clip)
+{
+	struct sdl_backend *be = backend_cntx;
+
+	if (!be)
+		return -1;
+
+	be->hasclip = clip != NULL;
+	if (clip)
+		be->clip = *clip;
+
+	return 0;
+}
+
 int smol2d_tex_clear(void *backend_cntx, struct smol2d_tex *tex, const struct smol2d_colour *colour)
 {
 	struct sdl_backend *be = backend_cntx;
 	struct sdl_tex *sdltex = (struct sdl_tex *)tex;
+	SDL_Rect rect;
 
 	if (!be || !sdltex || !colour)
 		return -1;
 
-	if (!SDL_FillSurfaceRect(sdltex->surface, NULL, colour->indexed.index))
+	if (be->hasclip) {
+		rect.x = be->clip.x;
+		rect.y = be->clip.y;
+		rect.w = (int)be->clip.w;
+		rect.h = (int)be->clip.h;
+	}
+
+	if (!SDL_FillSurfaceRect(sdltex->surface, be->hasclip ? &rect : NULL,
+				 colour->indexed.index))
 		return fail();
 
 	return 0;

@@ -34,6 +34,11 @@ struct smol2d_palette {
 	struct smol2d_colour_chunky colours[256];
 };
 
+struct smol2d_rect {
+	int x, y;
+	unsigned int w, h;
+};
+
 struct smol2d_drawlist {
 	struct smol2d_sprite **sprites;
 	unsigned int nsprites;
@@ -49,6 +54,8 @@ int smol2d_init(void **backend_cntx, enum smol2d_colourspace cs);
 
 /* For indexed colour modes set the palette */
 int smol2d_setpalette(void *backend_cntx, const struct smol2d_palette *palette);
+
+int smol2d_setclip(void *backend_cntx, const struct smol2d_rect *clip);
 
 /* Get a texture for the screen you should be building */
 struct smol2d_tex *smol2d_getbackbuffer(void *backend_cntx);
@@ -106,6 +113,38 @@ static inline void smol2d_c8_blit(uint8_t *dst, unsigned int dstw, unsigned int 
 				to[col] = from[col];
 		}
 	}
+}
+
+static inline void smol2d_c8_fill(uint8_t *dst, unsigned int dstw, unsigned int dsth,
+				  int x, int y, unsigned int w, unsigned int h,
+				  uint8_t index)
+{
+	unsigned int row;
+
+	if (x < 0) {
+		if ((unsigned int)-x >= w)
+			return;
+		w -= (unsigned int)-x;
+		x = 0;
+	}
+
+	if (y < 0) {
+		if ((unsigned int)-y >= h)
+			return;
+		h -= (unsigned int)-y;
+		y = 0;
+	}
+
+	if ((unsigned int)x >= dstw || (unsigned int)y >= dsth)
+		return;
+
+	if (w > dstw - (unsigned int)x)
+		w = dstw - (unsigned int)x;
+	if (h > dsth - (unsigned int)y)
+		h = dsth - (unsigned int)y;
+
+	for (row = 0; row < h; row++)
+		memset(dst + (size_t)((unsigned int)y + row) * dstw + (unsigned int)x, index, w);
 }
 
 static inline void smol2d_c8_copy(void *dst, unsigned int dstpitch,

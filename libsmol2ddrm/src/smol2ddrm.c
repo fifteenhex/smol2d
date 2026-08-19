@@ -36,6 +36,8 @@ struct drm_backend {
 	bool canflip;
 	uint32_t palette[256];
 	struct drm_tex backbuffer;
+	struct smol2d_rect clip;
+	bool hasclip;
 };
 
 static int findoutput(int card, struct drm_mode_card_res *res,
@@ -211,16 +213,37 @@ int smol2d_tex_load(void *backend_cntx, struct smol2d_tex *tex, const uint8_t *p
 	return 0;
 }
 
-int smol2d_tex_clear(void *backend_cntx, struct smol2d_tex *tex, const struct smol2d_colour *colour)
+int smol2d_setclip(void *backend_cntx, const struct smol2d_rect *clip)
 {
-	struct drm_tex *drmtex = (struct drm_tex *)tex;
+	struct drm_backend *be = backend_cntx;
 
-	(void)backend_cntx;
-
-	if (!drmtex || !colour)
+	if (!be)
 		return -1;
 
-	memset(drmtex->pixels, colour->indexed.index, (size_t)drmtex->tex.w * drmtex->tex.h);
+	be->hasclip = clip != NULL;
+	if (clip)
+		be->clip = *clip;
+
+	return 0;
+}
+
+int smol2d_tex_clear(void *backend_cntx, struct smol2d_tex *tex, const struct smol2d_colour *colour)
+{
+	struct drm_backend *be = backend_cntx;
+	struct drm_tex *drmtex = (struct drm_tex *)tex;
+
+	if (!be || !drmtex || !colour)
+		return -1;
+
+	if (!be->hasclip) {
+		memset(drmtex->pixels, colour->indexed.index,
+		       (size_t)drmtex->tex.w * drmtex->tex.h);
+		return 0;
+	}
+
+	smol2d_c8_fill(drmtex->pixels, drmtex->tex.w, drmtex->tex.h,
+		       be->clip.x, be->clip.y, be->clip.w, be->clip.h,
+		       colour->indexed.index);
 
 	return 0;
 }
