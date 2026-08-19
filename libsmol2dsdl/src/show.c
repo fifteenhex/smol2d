@@ -9,6 +9,14 @@
 
 #define MARKER		3	/* how far the step marker sits outside the paint */
 
+/*
+ * The damage boxes are worked out the way the drm backend works them out, so
+ * what they show is what the hardware would be told to move: at most this many
+ * rectangles, neighbours merged once there are more than that, and the whole
+ * screen once the pieces add up to more than the screen is worth.
+ */
+#define MAXDAMAGE	256
+
 #define DIM		56	/* how much of the frame shows through the trace */
 
 #define DEFAULT_DELAY	60
@@ -39,6 +47,10 @@ struct show {
 	unsigned int calls;
 	unsigned int offscreen;
 	unsigned long covered;
+	SDL_Rect damage[MAXDAMAGE];
+	unsigned int ndamage;
+	unsigned long damaged;
+	bool damagedall;
 	SDL_Rect last;
 	bool haslast;
 	SDL_Rect dirty;
@@ -211,6 +223,60 @@ static bool cliprect(const struct show *s, SDL_Rect *r)
 	return true;
 }
 
+static void merge(SDL_Rect *into, const SDL_Rect *with)
+{
+	int right = into->x + into->w > with->x + with->w ?
+		    into->x + into->w : with->x + with->w;
+	int bottom = into->y + into->h > with->y + with->h ?
+		     into->y + into->h : with->y + with->h;
+
+	into->x = into->x < with->x ? into->x : with->x;
+	into->y = into->y < with->y ? into->y : with->y;
+	into->w = right - into->x;
+	into->h = bottom - into->y;
+}
+
+static void coalesce(struct show *s, unsigned int want)
+{
+	unsigned int run, at, i;
+
+	if (s->ndamage <= want)
+		return;
+
+	run = (s->ndamage + want - 1) / want;
+
+	for (at = 0, i = 0; i < s->ndamage; at++) {
+		unsigned int end = i + run < s->ndamage ? i + run : s->ndamage;
+
+		s->damage[at] = s->damage[i];
+		for (i++; i < end; i++)
+			merge(&s->damage[at], &s->damage[i]);
+	}
+
+	s->ndamage = at;
+	s->damaged = 0;
+	for (i = 0; i < s->ndamage; i++)
+		s->damaged += (unsigned long)s->damage[i].w * s->damage[i].h;
+}
+
+static void damaged(struct show *s, const SDL_Rect *r)
+{
+	if (s->damagedall)
+		return;
+
+	if (s->ndamage == MAXDAMAGE)
+		coalesce(s, MAXDAMAGE / 2);
+
+	s->damage[s->ndamage++] = *r;
+	s->damaged += (unsigned long)r->w * r->h;
+
+	if (s->damaged >= (unsigned long)s->w * s->h) {
+		s->damagedall = true;
+		s->ndamage = 0;
+		s->damaged = (unsigned long)s->w * s->h;
+	}
+}
+
 static void outline(SDL_Surface *into, const SDL_Rect *r, Uint32 colour)
 {
 	const SDL_Rect edges[] = {
@@ -277,6 +343,7 @@ static void line(struct show *s, unsigned int n, const char *text)
 static void status(struct show *s)
 {
 	const float full = (float)(s->w * s->h);
+	char damage[48];
 	char text[160];
 
 	SDL_SetRenderDrawColor(s->renderer, 0xff, 0xff, 0xff, 0xff);
@@ -287,19 +354,50 @@ static void status(struct show *s)
 		     100.0f * (float)s->covered / full, s->w, s->h);
 	line(s, 0, text);
 
+	if (s->damagedall)
+		SDL_snprintf(damage, sizeof(damage), "damage the lot");
+	else
+		SDL_snprintf(damage, sizeof(damage), "damage %u boxes, %lu px",
+			     s->ndamage, s->damaged);
+
 	if (s->step)
-		SDL_snprintf(text, sizeof(text), "worst %lu px  every %u call%s, %u ms%s%s",
-			     s->worst, s->step, s->step == 1 ? "" : "s", s->delay,
+		SDL_snprintf(text, sizeof(text), "%s  worst %lu  every %u call%s, %u ms%s%s",
+			     damage, s->worst, s->step, s->step == 1 ? "" : "s", s->delay,
 			     s->offscreen ? "  +offscreen" : "", s->paused ? "  PAUSED" : "");
 	else
-		SDL_snprintf(text, sizeof(text), "worst %lu px  keeping up%s%s",
-			     s->worst, s->offscreen ? "  +offscreen" : "",
-			     s->paused ? "  PAUSED" : "");
+		SDL_snprintf(text, sizeof(text), "%s  worst %lu  keeping up%s%s",
+			     damage, s->worst,
+			     s->offscreen ? "  +offscreen" : "", s->paused ? "  PAUSED" : "");
 	line(s, 1, text);
 
-	line(s, 2, "left: the screen  right: what this frame touched  [space] [right]");
+	line(s, 2, "left: the screen  right: touched, red = damage  [space] [right]");
 
 	SDL_SetRenderScale(s->renderer, 1, 1);
+}
+
+static void drawdamage(struct show *s)
+{
+	const float over = (float)(s->w + SEP);
+	unsigned int i;
+
+	SDL_SetRenderDrawColor(s->renderer, 0xff, 0x20, 0x20, 0xff);
+
+	if (s->damagedall) {
+		const SDL_FRect all = { over, 0, (float)s->w, (float)s->h };
+
+		SDL_RenderRect(s->renderer, &all);
+		return;
+	}
+
+	/* drawn around the region rather than over it, so the paint still shows */
+	for (i = 0; i < s->ndamage; i++) {
+		const SDL_FRect box = { over + (float)s->damage[i].x - 1,
+					(float)s->damage[i].y - 1,
+					(float)s->damage[i].w + 2,
+					(float)s->damage[i].h + 2 };
+
+		SDL_RenderRect(s->renderer, &box);
+	}
 }
 
 static void render(struct show *s)
@@ -312,6 +410,9 @@ static void render(struct show *s)
 
 	SDL_RenderTexture(s->renderer, s->frametex, NULL, &left);
 	SDL_RenderTexture(s->renderer, s->tracetex, NULL, &right);
+
+	/* what the hardware would be told to move, merged as the backend merges it */
+	drawdamage(s);
 
 	/*
 	 * Where the last call went, so the sweep is visible while stepping. A
@@ -385,6 +486,7 @@ void show_call(struct show *s, const SDL_Surface *dst, enum show_kind kind,
 
 		SDL_BlitSurface(s->target, &r, s->frame, &r);
 		traced(s, &r, kind, index);
+		damaged(s, &r);
 
 		s->last = r;
 		s->haslast = true;
@@ -417,6 +519,9 @@ void show_present(struct show *s)
 	s->calls = 0;
 	s->offscreen = 0;
 	s->covered = 0;
+	s->ndamage = 0;
+	s->damaged = 0;
+	s->damagedall = false;
 	s->haslast = false;
 }
 
