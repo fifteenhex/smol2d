@@ -11,6 +11,9 @@
 #define SINESTEPS	64
 #define SINESHIFT	2
 
+#define WAVESPEED	128
+#define FRAMERATE	60
+
 static const int8_t sinetable[SINESTEPS] = {
 	   0,    5,    9,   14,   18,   23,   27,   30,
 	  34,   37,   40,   42,   44,   46,   47,   48,
@@ -45,7 +48,7 @@ static void makewave(struct smol2d_mask *mask, unsigned int phase)
 
 	for (x = 0; x < mask->w; x++) {
 		int top = (int)(mask->h / 2) +
-			  sinetable[((x >> SINESHIFT) + phase) & (SINESTEPS - 1)];
+			  sinetable[((x + phase) >> SINESHIFT) & (SINESTEPS - 1)];
 
 		if (top < 0)
 			top = 0;
@@ -63,7 +66,6 @@ int main(void)
 	struct smol2d_tex *backbuffer;
 	struct smol2d_mask *wave;
 	void *backend_cntx;
-	unsigned int phase = 0;
 
 	if (smol2d_init(&backend_cntx, SMOL2D_CS_C8)) {
 		fprintf(stderr, "could not open a display\n");
@@ -91,8 +93,11 @@ int main(void)
 		return 1;
 	}
 
+	smol2d_setframerate(backend_cntx, FRAMERATE);
+
 	while (!smol2d_waitkey(backend_cntx, 0)) {
-		makewave(wave, phase++);
+		makewave(wave, (unsigned int)(smol2d_getticks(backend_cntx) *
+					      WAVESPEED / 1000));
 
 		smol2d_setmask(backend_cntx, NULL);
 		if (smol2d_tex_clear(backend_cntx, backbuffer, &blue))

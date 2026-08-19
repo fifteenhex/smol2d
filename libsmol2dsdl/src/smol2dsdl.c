@@ -18,6 +18,9 @@ struct sdl_backend {
 	struct smol2d_rect clip;
 	bool hasclip;
 	const struct smol2d_mask *mask;
+	Uint64 start;
+	Uint64 period;
+	Uint64 nextframe;
 	bool closing;
 };
 
@@ -82,6 +85,8 @@ int smol2d_init(void **backend_cntx, enum smol2d_colourspace cs)
 		goto err_quit;
 
 	getsize(&width, &height);
+
+	be->start = SDL_GetTicksNS();
 
 	be->window = SDL_CreateWindow("smol2d", width, height, 0);
 	if (!be->window)
@@ -407,6 +412,47 @@ int smol2d_waitkey(void *backend_cntx, unsigned int timeout)
 	return 0;
 }
 
+uint64_t smol2d_getticks(void *backend_cntx)
+{
+	struct sdl_backend *be = backend_cntx;
+
+	if (!be)
+		return 0;
+
+	return (SDL_GetTicksNS() - be->start) / SDL_NS_PER_MS;
+}
+
+int smol2d_setframerate(void *backend_cntx, unsigned int fps)
+{
+	struct sdl_backend *be = backend_cntx;
+
+	if (!be)
+		return -1;
+
+	be->period = fps ? SDL_NS_PER_SECOND / fps : 0;
+	be->nextframe = SDL_GetTicksNS() + be->period;
+
+	return 0;
+}
+
+static void pace(struct sdl_backend *be)
+{
+	Uint64 now;
+
+	if (!be->period)
+		return;
+
+	now = SDL_GetTicksNS();
+	if (now < be->nextframe)
+		SDL_DelayNS(be->nextframe - now);
+
+	be->nextframe += be->period;
+
+	now = SDL_GetTicksNS();
+	if (now > be->nextframe)
+		be->nextframe = now + be->period;
+}
+
 int smol2d_present(void *backend_cntx)
 {
 	struct sdl_backend *be = backend_cntx;
@@ -434,6 +480,7 @@ int smol2d_present(void *backend_cntx)
 		return fail();
 
 	pumpevents(be);
+	pace(be);
 
 	return be->closing ? 1 : 0;
 }

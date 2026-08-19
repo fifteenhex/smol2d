@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 #endif
 
@@ -39,6 +40,9 @@ struct drm_backend {
 	struct smol2d_rect clip;
 	bool hasclip;
 	const struct smol2d_mask *mask;
+	uint64_t start;
+	uint64_t period;
+	uint64_t nextframe;
 };
 
 static int findoutput(int card, struct drm_mode_card_res *res,
@@ -73,6 +77,19 @@ static int findoutput(int card, struct drm_mode_card_res *res,
 	return -ENODEV;
 }
 
+#define NSPERSEC	1000000000ull
+#define NSPERMS		1000000ull
+
+static uint64_t now_ns(void)
+{
+	struct timespec ts;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &ts))
+		return 0;
+
+	return (uint64_t)ts.tv_sec * NSPERSEC + (uint64_t)ts.tv_nsec;
+}
+
 int smol2d_init(void **backend_cntx, enum smol2d_colourspace cs)
 {
 	struct drm_mode_card_res __smoldrm_cleanup_resources res = { 0 };
@@ -95,6 +112,7 @@ int smol2d_init(void **backend_cntx, enum smol2d_colourspace cs)
 		goto err_close;
 
 	be->card = card;
+	be->start = now_ns();
 
 	if (smoldrm_getresources(card, &res))
 		goto err_free;
@@ -356,6 +374,52 @@ int smol2d_waitkey(void *backend_cntx, unsigned int timeout)
 	return backend_cntx ? 0 : -1;
 }
 
+uint64_t smol2d_getticks(void *backend_cntx)
+{
+	struct drm_backend *be = backend_cntx;
+
+	if (!be)
+		return 0;
+
+	return (now_ns() - be->start) / NSPERMS;
+}
+
+int smol2d_setframerate(void *backend_cntx, unsigned int fps)
+{
+	struct drm_backend *be = backend_cntx;
+
+	if (!be)
+		return -1;
+
+	be->period = fps ? NSPERSEC / fps : 0;
+	be->nextframe = now_ns() + be->period;
+
+	return 0;
+}
+
+static void pace(struct drm_backend *be)
+{
+	uint64_t now = now_ns();
+
+	if (!be->period)
+		return;
+
+	if (now < be->nextframe) {
+		struct timespec left = {
+			.tv_sec = (time_t)((be->nextframe - now) / NSPERSEC),
+			.tv_nsec = (long)((be->nextframe - now) % NSPERSEC),
+		};
+
+		nanosleep(&left, NULL);
+	}
+
+	be->nextframe += be->period;
+
+	now = now_ns();
+	if (now > be->nextframe)
+		be->nextframe = now + be->period;
+}
+
 int smol2d_present(void *backend_cntx)
 {
 	struct drm_backend *be = backend_cntx;
@@ -377,6 +441,7 @@ int smol2d_present(void *backend_cntx)
 	}
 
 	be->back = (be->back + 1) % NBUFFERS;
+	pace(be);
 
 	return 0;
 }

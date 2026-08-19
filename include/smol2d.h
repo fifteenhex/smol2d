@@ -91,6 +91,10 @@ int smol2d_tex_renderto(void *backend_cntx, struct smol2d_tex *tex, struct smol2
 
 int smol2d_present(void *backend_cntx);
 
+uint64_t smol2d_getticks(void *backend_cntx);
+
+int smol2d_setframerate(void *backend_cntx, unsigned int fps);
+
 /* 0 == non-blocking  */
 int smol2d_waitkey(void *backend_cntx, unsigned int timeout);
 
