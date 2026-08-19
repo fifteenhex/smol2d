@@ -5,7 +5,9 @@ demos: backends
 
 backends:
 	$(MAKE) -C libsmol2dsdl
+	$(MAKE) -C libsmol2ddrm
 
 clean:
 	$(MAKE) -C libsmol2dsdl clean
+	$(MAKE) -C libsmol2ddrm clean
 	$(MAKE) -C demos clean
