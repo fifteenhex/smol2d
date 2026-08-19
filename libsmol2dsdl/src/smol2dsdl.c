@@ -17,6 +17,7 @@ struct sdl_backend {
 	SDL_Palette *palette;
 	struct smol2d_rect clip;
 	bool hasclip;
+	const struct smol2d_mask *mask;
 	bool closing;
 };
 
@@ -206,6 +207,59 @@ int smol2d_setclip(void *backend_cntx, const struct smol2d_rect *clip)
 	return 0;
 }
 
+
+int smol2d_mask_create(void *backend_cntx, struct smol2d_mask **mask,
+		       unsigned int width, unsigned int height)
+{
+	struct smol2d_mask *m;
+	unsigned int stride;
+
+	if (!backend_cntx || !mask || !width || !height)
+		return -1;
+
+	m = SDL_calloc(1, sizeof(*m));
+	if (!m)
+		return -1;
+
+	stride = (width + 7) / 8;
+
+	m->bits = SDL_calloc(stride, height);
+	if (!m->bits) {
+		SDL_free(m);
+		return -1;
+	}
+
+	m->w = width;
+	m->h = height;
+	m->stride = stride;
+
+	*mask = m;
+	return 0;
+}
+
+void smol2d_mask_destroy(void *backend_cntx, struct smol2d_mask *mask)
+{
+	(void)backend_cntx;
+
+	if (!mask)
+		return;
+
+	SDL_free(mask->bits);
+	SDL_free(mask);
+}
+
+int smol2d_setmask(void *backend_cntx, const struct smol2d_mask *mask)
+{
+	struct sdl_backend *be = backend_cntx;
+
+	if (!be)
+		return -1;
+
+	be->mask = mask;
+
+	return 0;
+}
+
 int smol2d_tex_clear(void *backend_cntx, struct smol2d_tex *tex, const struct smol2d_colour *colour)
 {
 	struct sdl_backend *be = backend_cntx;
@@ -220,6 +274,27 @@ int smol2d_tex_clear(void *backend_cntx, struct smol2d_tex *tex, const struct sm
 		rect.y = be->clip.y;
 		rect.w = (int)be->clip.w;
 		rect.h = (int)be->clip.h;
+	} else {
+		rect.x = 0;
+		rect.y = 0;
+		rect.w = sdltex->surface->w;
+		rect.h = sdltex->surface->h;
+	}
+
+	if (be->mask) {
+		if (!SDL_LockSurface(sdltex->surface))
+			return fail();
+
+		smol2d_c8_fill_masked(sdltex->surface->pixels,
+				      (unsigned int)sdltex->surface->w,
+				      (unsigned int)sdltex->surface->h,
+				      (unsigned int)sdltex->surface->pitch,
+				      rect.x, rect.y,
+				      (unsigned int)rect.w, (unsigned int)rect.h,
+				      colour->indexed.index, be->mask);
+
+		SDL_UnlockSurface(sdltex->surface);
+		return 0;
 	}
 
 	if (!SDL_FillSurfaceRect(sdltex->surface, be->hasclip ? &rect : NULL,

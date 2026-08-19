@@ -38,6 +38,7 @@ struct drm_backend {
 	struct drm_tex backbuffer;
 	struct smol2d_rect clip;
 	bool hasclip;
+	const struct smol2d_mask *mask;
 };
 
 static int findoutput(int card, struct drm_mode_card_res *res,
@@ -227,6 +228,59 @@ int smol2d_setclip(void *backend_cntx, const struct smol2d_rect *clip)
 	return 0;
 }
 
+
+int smol2d_mask_create(void *backend_cntx, struct smol2d_mask **mask,
+		       unsigned int width, unsigned int height)
+{
+	struct smol2d_mask *m;
+	unsigned int stride;
+
+	if (!backend_cntx || !mask || !width || !height)
+		return -1;
+
+	m = calloc(1, sizeof(*m));
+	if (!m)
+		return -1;
+
+	stride = (width + 7) / 8;
+
+	m->bits = calloc(stride, height);
+	if (!m->bits) {
+		free(m);
+		return -1;
+	}
+
+	m->w = width;
+	m->h = height;
+	m->stride = stride;
+
+	*mask = m;
+	return 0;
+}
+
+void smol2d_mask_destroy(void *backend_cntx, struct smol2d_mask *mask)
+{
+	(void)backend_cntx;
+
+	if (!mask)
+		return;
+
+	free(mask->bits);
+	free(mask);
+}
+
+int smol2d_setmask(void *backend_cntx, const struct smol2d_mask *mask)
+{
+	struct drm_backend *be = backend_cntx;
+
+	if (!be)
+		return -1;
+
+	be->mask = mask;
+
+	return 0;
+}
+
 int smol2d_tex_clear(void *backend_cntx, struct smol2d_tex *tex, const struct smol2d_colour *colour)
 {
 	struct drm_backend *be = backend_cntx;
@@ -235,15 +289,23 @@ int smol2d_tex_clear(void *backend_cntx, struct smol2d_tex *tex, const struct sm
 	if (!be || !drmtex || !colour)
 		return -1;
 
-	if (!be->hasclip) {
+	if (!be->hasclip && !be->mask) {
 		memset(drmtex->pixels, colour->indexed.index,
 		       (size_t)drmtex->tex.w * drmtex->tex.h);
 		return 0;
 	}
 
-	smol2d_c8_fill(drmtex->pixels, drmtex->tex.w, drmtex->tex.h,
-		       be->clip.x, be->clip.y, be->clip.w, be->clip.h,
-		       colour->indexed.index);
+	if (!be->hasclip) {
+		smol2d_c8_fill_masked(drmtex->pixels, drmtex->tex.w, drmtex->tex.h,
+				      drmtex->tex.w, 0, 0, drmtex->tex.w, drmtex->tex.h,
+				      colour->indexed.index, be->mask);
+		return 0;
+	}
+
+	smol2d_c8_fill_masked(drmtex->pixels, drmtex->tex.w, drmtex->tex.h,
+			      drmtex->tex.w, be->clip.x, be->clip.y,
+			      be->clip.w, be->clip.h,
+			      colour->indexed.index, be->mask);
 
 	return 0;
 }

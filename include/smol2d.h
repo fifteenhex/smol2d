@@ -39,6 +39,12 @@ struct smol2d_rect {
 	unsigned int w, h;
 };
 
+struct smol2d_mask {
+	unsigned int w, h;
+	unsigned int stride;
+	uint8_t *bits;
+};
+
 struct smol2d_drawlist {
 	struct smol2d_sprite **sprites;
 	unsigned int nsprites;
@@ -56,6 +62,12 @@ int smol2d_init(void **backend_cntx, enum smol2d_colourspace cs);
 int smol2d_setpalette(void *backend_cntx, const struct smol2d_palette *palette);
 
 int smol2d_setclip(void *backend_cntx, const struct smol2d_rect *clip);
+
+int smol2d_setmask(void *backend_cntx, const struct smol2d_mask *mask);
+
+int smol2d_mask_create(void *backend_cntx, struct smol2d_mask **mask,
+		       unsigned int width, unsigned int height);
+void smol2d_mask_destroy(void *backend_cntx, struct smol2d_mask *mask);
 
 /* Get a texture for the screen you should be building */
 struct smol2d_tex *smol2d_getbackbuffer(void *backend_cntx);
@@ -115,11 +127,21 @@ static inline void smol2d_c8_blit(uint8_t *dst, unsigned int dstw, unsigned int 
 	}
 }
 
-static inline void smol2d_c8_fill(uint8_t *dst, unsigned int dstw, unsigned int dsth,
-				  int x, int y, unsigned int w, unsigned int h,
-				  uint8_t index)
+static inline int smol2d_mask_bit(const struct smol2d_mask *mask,
+				  unsigned int x, unsigned int y)
 {
-	unsigned int row;
+	if (x >= mask->w || y >= mask->h)
+		return 0;
+
+	return mask->bits[(size_t)y * mask->stride + x / 8] & (0x80u >> (x % 8));
+}
+
+static inline void smol2d_c8_fill_masked(uint8_t *dst, unsigned int dstw, unsigned int dsth,
+					 unsigned int dststride,
+					 int x, int y, unsigned int w, unsigned int h,
+					 uint8_t index, const struct smol2d_mask *mask)
+{
+	unsigned int row, col;
 
 	if (x < 0) {
 		if ((unsigned int)-x >= w)
@@ -143,8 +165,27 @@ static inline void smol2d_c8_fill(uint8_t *dst, unsigned int dstw, unsigned int 
 	if (h > dsth - (unsigned int)y)
 		h = dsth - (unsigned int)y;
 
-	for (row = 0; row < h; row++)
-		memset(dst + (size_t)((unsigned int)y + row) * dstw + (unsigned int)x, index, w);
+	for (row = 0; row < h; row++) {
+		unsigned int dy = (unsigned int)y + row;
+		uint8_t *to = dst + (size_t)dy * dststride + (unsigned int)x;
+
+		if (!mask) {
+			memset(to, index, w);
+			continue;
+		}
+
+		for (col = 0; col < w; col++) {
+			if (smol2d_mask_bit(mask, (unsigned int)x + col, dy))
+				to[col] = index;
+		}
+	}
+}
+
+static inline void smol2d_c8_fill(uint8_t *dst, unsigned int dstw, unsigned int dsth,
+				  int x, int y, unsigned int w, unsigned int h,
+				  uint8_t index)
+{
+	smol2d_c8_fill_masked(dst, dstw, dsth, dstw, x, y, w, h, index, NULL);
 }
 
 static inline void smol2d_c8_copy(void *dst, unsigned int dstpitch,
