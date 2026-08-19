@@ -31,7 +31,7 @@ all: $(DEMOS)
 
 ifdef NOLIBCDIR
 %_drm_nolibc: %.c $(DRM_BACKEND_NOLIBC)
-	$(CC) $(NOLIBC_CFLAGS) $(NOLIBC_LDFLAGS) -I ../include -o $@ $^
+	$(CC) $(NOLIBC_CFLAGS) $(NOLIBC_LDFLAGS) -I ../include -o $@ $^ -lgcc
 endif
 
 clean:
