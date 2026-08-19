@@ -420,6 +420,107 @@ static void pace(struct drm_backend *be)
 		be->nextframe = now + be->period;
 }
 
+/*
+ * A made ready pipeline. The op list is copied in and what the backend can
+ * settle in advance is settled here: where each target's pixels are and how
+ * big it is. Running it does none of that again, so a frame costs the dynamic
+ * fields the caller wrote and the paint itself.
+ */
+struct pipeline_op {
+	uint8_t *pixels;
+	unsigned int w, h;
+};
+
+struct smol2d_pipeline {
+	struct smol2d_op *ops;
+	struct pipeline_op *ready;
+	unsigned int nops;
+};
+
+int smol2d_pipeline_create(void *backend_cntx, const struct smol2d_op *ops,
+			   unsigned int nops, struct smol2d_pipeline **pipeline)
+{
+	struct smol2d_pipeline *p;
+	unsigned int i;
+
+	if (!backend_cntx || !pipeline || (!ops && nops))
+		return -1;
+
+	p = calloc(1, sizeof(*p));
+	if (!p)
+		return -1;
+
+	p->ops = calloc(nops ? nops : 1, sizeof(*p->ops));
+	p->ready = calloc(nops ? nops : 1, sizeof(*p->ready));
+	if (!p->ops || !p->ready) {
+		smol2d_pipeline_destroy(backend_cntx, p);
+		return -1;
+	}
+
+	if (nops)
+		memcpy(p->ops, ops, nops * sizeof(*ops));
+	p->nops = nops;
+
+	for (i = 0; i < nops; i++) {
+		const struct drm_tex *dst = (const struct drm_tex *)ops[i].dst;
+
+		if (ops[i].type != SMOL2D_OP_FILL || !dst) {
+			smol2d_pipeline_destroy(backend_cntx, p);
+			return -1;
+		}
+
+		p->ready[i].pixels = dst->pixels;
+		p->ready[i].w = dst->tex.w;
+		p->ready[i].h = dst->tex.h;
+	}
+
+	*pipeline = p;
+	return 0;
+}
+
+struct smol2d_op *smol2d_pipeline_params(struct smol2d_pipeline *pipeline, unsigned int op)
+{
+	if (!pipeline || op >= pipeline->nops)
+		return NULL;
+
+	return &pipeline->ops[op];
+}
+
+int smol2d_pipeline_run(void *backend_cntx, struct smol2d_pipeline *pipeline)
+{
+	unsigned int i;
+
+	if (!backend_cntx || !pipeline)
+		return -1;
+
+	for (i = 0; i < pipeline->nops; i++) {
+		const struct smol2d_op *op = &pipeline->ops[i];
+		const struct pipeline_op *ready = &pipeline->ready[i];
+
+		if (!op->fill.rect.w || !op->fill.rect.h)
+			continue;
+
+		smol2d_c8_fill(ready->pixels, ready->w, ready->h,
+			       op->fill.rect.x, op->fill.rect.y,
+			       op->fill.rect.w, op->fill.rect.h,
+			       op->fill.colour.indexed.index);
+	}
+
+	return 0;
+}
+
+void smol2d_pipeline_destroy(void *backend_cntx, struct smol2d_pipeline *pipeline)
+{
+	(void)backend_cntx;
+
+	if (!pipeline)
+		return;
+
+	free(pipeline->ready);
+	free(pipeline->ops);
+	free(pipeline);
+}
+
 int smol2d_present(void *backend_cntx)
 {
 	struct drm_backend *be = backend_cntx;
