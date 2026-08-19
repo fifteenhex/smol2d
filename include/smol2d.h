@@ -91,6 +91,36 @@ int smol2d_tex_renderto(void *backend_cntx, struct smol2d_tex *tex, struct smol2
 
 int smol2d_present(void *backend_cntx);
 
+/*
+ * Drawing described as data. The list is handed over once and made ready then;
+ * per frame only the fields marked dynamic are written, through
+ * smol2d_pipeline_params(), which hands back the pipeline's own copy of an op.
+ * Whatever the backend can work out in advance it works out once.
+ */
+enum smol2d_optype {
+	SMOL2D_OP_FILL,
+};
+
+struct smol2d_op {
+	enum smol2d_optype type;		/* structural */
+	struct smol2d_tex *dst;			/* structural */
+
+	union {
+		struct {
+			struct smol2d_rect rect;	/* dynamic */
+			struct smol2d_colour colour;	/* dynamic */
+		} fill;
+	};
+};
+
+struct smol2d_pipeline;
+
+int smol2d_pipeline_create(void *backend_cntx, const struct smol2d_op *ops,
+			   unsigned int nops, struct smol2d_pipeline **pipeline);
+struct smol2d_op *smol2d_pipeline_params(struct smol2d_pipeline *pipeline, unsigned int op);
+int smol2d_pipeline_run(void *backend_cntx, struct smol2d_pipeline *pipeline);
+void smol2d_pipeline_destroy(void *backend_cntx, struct smol2d_pipeline *pipeline);
+
 uint64_t smol2d_getticks(void *backend_cntx);
 
 int smol2d_setframerate(void *backend_cntx, unsigned int fps);
