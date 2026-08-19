@@ -1,20 +1,23 @@
 #include <stdio.h>
+#include <string.h>
 
 #include <smol2d.h>
 
+#define BLUE	1
+
 static void makepalette(struct smol2d_palette *palette)
 {
-	int i;
+	memset(palette, 0, sizeof(*palette));
 
-	for (i = 0; i < 256; i++) {
-		palette->colours[i].r = i;
-		palette->colours[i].g = i;
-		palette->colours[i].b = i;
-	}
+	/* light electric blue */
+	palette->colours[BLUE].r = 0x7d;
+	palette->colours[BLUE].g = 0xf9;
+	palette->colours[BLUE].b = 0xff;
 }
 
 int main(void)
 {
+	const struct smol2d_colour blue = { .indexed = { .index = BLUE } };
 	struct smol2d_palette palette;
 	struct smol2d_tex *backbuffer;
 	void *backend_cntx;
@@ -35,6 +38,18 @@ int main(void)
 	makepalette(&palette);
 	if (smol2d_setpalette(backend_cntx, &palette)) {
 		fprintf(stderr, "no palette\n");
+		smol2d_close(backend_cntx);
+		return 1;
+	}
+
+	if (smol2d_tex_clear(backend_cntx, backbuffer, &blue)) {
+		fprintf(stderr, "could not clear the frame\n");
+		smol2d_close(backend_cntx);
+		return 1;
+	}
+
+	if (smol2d_present(backend_cntx)) {
+		fprintf(stderr, "could not present\n");
 		smol2d_close(backend_cntx);
 		return 1;
 	}
