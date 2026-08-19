@@ -1,3 +1,6 @@
 [submodule "smoldrm"]
 	path = smoldrm
 	url = https://github.com/fifteenhex/smoldrm.git
+[submodule "fbdevgl"]
+	path = fbdevgl
+	url = https://github.com/fifteenhex/fbdevgl.git
