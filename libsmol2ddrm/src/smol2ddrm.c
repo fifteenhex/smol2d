@@ -1,3 +1,4 @@
+#ifndef NOLIBC
 #define _GNU_SOURCE
 
 #include <errno.h>
@@ -10,6 +11,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#endif
 
 #include <smoldrm.h>
 
