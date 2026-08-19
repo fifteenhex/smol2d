@@ -2,6 +2,8 @@
 
 #include <smol2d.h>
 
+#include "show.h"
+
 #define DEFAULT_WIDTH	640
 #define DEFAULT_HEIGHT	480
 
@@ -22,7 +24,10 @@ struct sdl_backend {
 	Uint64 period;
 	Uint64 nextframe;
 	bool closing;
+	struct show *show;
 };
+
+static bool showpump(void *cntx);
 
 static void getsize(int *width, int *height)
 {
@@ -99,6 +104,9 @@ int smol2d_init(void **backend_cntx, enum smol2d_colourspace cs)
 	be->palette = SDL_CreateSurfacePalette(be->backbuffer.surface);
 	if (!be->palette)
 		goto err_surface;
+
+	/* nothing if SMOL2D_SHOW is unset, and it is never fatal */
+	be->show = show_open(be->backbuffer.surface, showpump, be);
 
 	*backend_cntx = be;
 	return 0;
@@ -183,10 +191,9 @@ void smol2d_tex_destroy(void *backend_cntx, struct smol2d_tex *tex)
 
 int smol2d_tex_load(void *backend_cntx, struct smol2d_tex *tex, const uint8_t *pixels)
 {
+	struct sdl_backend *be = backend_cntx;
 	struct sdl_tex *sdltex = (struct sdl_tex *)tex;
 	unsigned int y;
-
-	(void)backend_cntx;
 
 	if (!sdltex || !pixels)
 		return -1;
@@ -194,6 +201,10 @@ int smol2d_tex_load(void *backend_cntx, struct smol2d_tex *tex, const uint8_t *p
 	for (y = 0; y < sdltex->tex.h; y++)
 		SDL_memcpy((uint8_t *)sdltex->surface->pixels + y * sdltex->surface->pitch,
 			   pixels + (size_t)y * sdltex->tex.w, sdltex->tex.w);
+
+	if (be)
+		show_call(be->show, sdltex->surface, SHOW_LOAD, 0, 0,
+			  sdltex->tex.w, sdltex->tex.h, 0);
 
 	return 0;
 }
@@ -299,6 +310,8 @@ int smol2d_tex_clear(void *backend_cntx, struct smol2d_tex *tex, const struct sm
 				      colour->indexed.index, be->mask);
 
 		SDL_UnlockSurface(sdltex->surface);
+		show_call(be->show, sdltex->surface, SHOW_CLEAR, rect.x, rect.y,
+			  (unsigned int)rect.w, (unsigned int)rect.h, colour->indexed.index);
 		return 0;
 	}
 
@@ -306,6 +319,8 @@ int smol2d_tex_clear(void *backend_cntx, struct smol2d_tex *tex, const struct sm
 				 colour->indexed.index))
 		return fail();
 
+	show_call(be->show, sdltex->surface, SHOW_CLEAR, rect.x, rect.y,
+		  (unsigned int)rect.w, (unsigned int)rect.h, colour->indexed.index);
 	return 0;
 }
 
@@ -326,10 +341,11 @@ int smol2d_tex_setkey(void *backend_cntx, struct smol2d_tex *tex, int key)
 
 int smol2d_tex_renderto(void *backend_cntx, struct smol2d_tex *tex, struct smol2d_drawlist *drawlist)
 {
+	struct sdl_backend *be = backend_cntx;
 	struct sdl_tex *sdltex = (struct sdl_tex *)tex;
 	unsigned int i;
 
-	if (!backend_cntx || !sdltex || !drawlist)
+	if (!be || !sdltex || !drawlist)
 		return -1;
 
 	for (i = 0; i < drawlist->nsprites; i++) {
@@ -348,6 +364,9 @@ int smol2d_tex_renderto(void *backend_cntx, struct smol2d_tex *tex, struct smol2
 
 		if (!SDL_BlitSurface(from->surface, NULL, sdltex->surface, &dstrect))
 			return fail();
+
+		show_call(be->show, sdltex->surface, SHOW_BLIT, dstrect.x, dstrect.y,
+			  (unsigned int)dstrect.w, (unsigned int)dstrect.h, 0);
 	}
 
 	return 0;
@@ -355,6 +374,10 @@ int smol2d_tex_renderto(void *backend_cntx, struct smol2d_tex *tex, struct smol2
 
 static bool takeevent(struct sdl_backend *be, const SDL_Event *event)
 {
+	/* show's own keys, and its window closing, are not the app's business */
+	if (show_key(be->show, event))
+		return false;
+
 	if (event->type == SDL_EVENT_QUIT ||
 	    event->type == SDL_EVENT_WINDOW_CLOSE_REQUESTED)
 		be->closing = true;
@@ -396,6 +419,7 @@ struct pipeline_op {
 	uint8_t *pixels;
 	unsigned int w, h;
 	unsigned int stride;
+	const SDL_Surface *surface;	/* only so show can tell targets apart */
 };
 
 struct smol2d_pipeline {
@@ -441,6 +465,7 @@ int smol2d_pipeline_create(void *backend_cntx, const struct smol2d_op *ops,
 		p->ready[i].w = (unsigned int)dst->surface->w;
 		p->ready[i].h = (unsigned int)dst->surface->h;
 		p->ready[i].stride = (unsigned int)dst->surface->pitch;
+		p->ready[i].surface = dst->surface;
 	}
 
 	*pipeline = p;
@@ -457,9 +482,10 @@ struct smol2d_op *smol2d_pipeline_params(struct smol2d_pipeline *pipeline, unsig
 
 int smol2d_pipeline_run(void *backend_cntx, struct smol2d_pipeline *pipeline)
 {
+	struct sdl_backend *be = backend_cntx;
 	unsigned int i;
 
-	if (!backend_cntx || !pipeline)
+	if (!be || !pipeline)
 		return -1;
 
 	for (i = 0; i < pipeline->nops; i++) {
@@ -473,6 +499,12 @@ int smol2d_pipeline_run(void *backend_cntx, struct smol2d_pipeline *pipeline)
 				      op->fill.rect.x, op->fill.rect.y,
 				      op->fill.rect.w, op->fill.rect.h,
 				      op->fill.colour.indexed.index, NULL);
+
+		if (be->show)
+			show_call(be->show, ready->surface, SHOW_FILL,
+				  op->fill.rect.x, op->fill.rect.y,
+				  op->fill.rect.w, op->fill.rect.h,
+				  op->fill.colour.indexed.index);
 	}
 
 	return 0;
@@ -493,6 +525,16 @@ void smol2d_pipeline_destroy(void *backend_cntx, struct smol2d_pipeline *pipelin
 static void pumpevents(struct sdl_backend *be)
 {
 	drainevents(be);
+}
+
+/* What show calls to stay alive while it is holding a frame still */
+static bool showpump(void *cntx)
+{
+	struct sdl_backend *be = cntx;
+
+	drainevents(be);
+
+	return be->closing;
 }
 
 int smol2d_waitkey(void *backend_cntx, unsigned int timeout)
@@ -526,6 +568,14 @@ uint64_t smol2d_getticks(void *backend_cntx)
 
 	if (!be)
 		return 0;
+
+	/*
+	 * Watching a frame get built takes far longer than the frame is meant
+	 * to last, so while show is stepping the clock counts frames instead of
+	 * time and the app draws what it would have drawn at speed.
+	 */
+	if (be->show && be->period)
+		return show_ticks(be->show, be->period);
 
 	return (SDL_GetTicksNS() - be->start) / SDL_NS_PER_MS;
 }
@@ -587,6 +637,8 @@ int smol2d_present(void *backend_cntx)
 	if (!SDL_UpdateWindowSurface(be->window))
 		return fail();
 
+	show_present(be->show);
+
 	pumpevents(be);
 	pace(be);
 
@@ -600,6 +652,7 @@ void smol2d_close(void *backend_cntx)
 	if (!be)
 		return;
 
+	show_close(be->show);
 	SDL_DestroySurface(be->backbuffer.surface);
 	SDL_DestroyWindow(be->window);
 	SDL_free(be);
