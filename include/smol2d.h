@@ -1,8 +1,10 @@
 #ifndef __SMOL2D_H
 #define __SMOL2D_H
 
+#ifndef NOLIBC
 #include <stdint.h>
 #include <string.h>
+#endif
 
 struct smol2d_tex {
 	unsigned int w, h;

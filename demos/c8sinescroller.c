@@ -1,5 +1,7 @@
+#ifndef NOLIBC
 #include <stdio.h>
 #include <string.h>
+#endif
 
 #include <smol2d.h>
 
