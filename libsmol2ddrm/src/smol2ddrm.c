@@ -20,6 +20,24 @@
 
 #define NBUFFERS	2
 
+/*
+ * What has changed since a buffer was last put on screen. Each buffer keeps
+ * its own list: the one about to be shown was last seen NBUFFERS frames ago,
+ * so it needs everything drawn since then, not just this frame's worth.
+ *
+ * The list is capped at what the kernel will take as damage in one go. When it
+ * fills up neighbouring rectangles are merged rather than the whole thing
+ * being given up on, so it stays bounded without falling back to the screen.
+ */
+#define MAXDAMAGE	DRM_MODE_FB_DIRTY_MAX_CLIPS
+
+struct damage {
+	struct smol2d_rect rects[MAXDAMAGE];
+	unsigned int n;
+	unsigned long area;
+	bool all;
+};
+
 struct drm_tex {
 	struct smol2d_tex tex;
 	uint8_t *pixels;
@@ -33,8 +51,10 @@ struct drm_backend {
 	uint32_t crtc_id;
 	struct drm_mode_modeinfo mode;
 	struct smoldrm_dumbbuffer buffers[NBUFFERS];
+	struct damage damage[NBUFFERS];
 	unsigned int back;
 	bool canflip;
+	bool nodirty;
 	uint32_t palette[256];
 	struct drm_tex backbuffer;
 	struct smol2d_rect clip;
@@ -90,6 +110,117 @@ static uint64_t now_ns(void)
 	return (uint64_t)ts.tv_sec * NSPERSEC + (uint64_t)ts.tv_nsec;
 }
 
+static void merge(struct smol2d_rect *into, const struct smol2d_rect *with)
+{
+	int x = into->x < with->x ? into->x : with->x;
+	int y = into->y < with->y ? into->y : with->y;
+	int right = into->x + (int)into->w;
+	int bottom = into->y + (int)into->h;
+
+	if (with->x + (int)with->w > right)
+		right = with->x + (int)with->w;
+	if (with->y + (int)with->h > bottom)
+		bottom = with->y + (int)with->h;
+
+	into->x = x;
+	into->y = y;
+	into->w = (unsigned int)(right - x);
+	into->h = (unsigned int)(bottom - y);
+}
+
+/*
+ * Fold the list down to at most want entries by merging runs of neighbours.
+ * Drawing tends to arrive in some sort of order, so neighbours in the list are
+ * usually neighbours on screen and the boxes stay tight. When it does not, the
+ * boxes swell to cover the gaps, which is what the running total is for.
+ */
+static void coalesce(struct damage *d, unsigned int want)
+{
+	unsigned int run, at, i;
+
+	if (d->n <= want)
+		return;
+
+	run = (d->n + want - 1) / want;
+
+	for (at = 0, i = 0; i < d->n; at++) {
+		unsigned int end = i + run < d->n ? i + run : d->n;
+
+		d->rects[at] = d->rects[i];
+		for (i++; i < end; i++)
+			merge(&d->rects[at], &d->rects[i]);
+	}
+
+	d->n = at;
+	d->area = 0;
+	for (i = 0; i < d->n; i++)
+		d->area += (unsigned long)d->rects[i].w * d->rects[i].h;
+}
+
+/* Every buffer has to be told: they all have to catch up eventually */
+static void damaged(struct drm_backend *be, const struct smol2d_tex *tex,
+		    int x, int y, unsigned int w, unsigned int h)
+{
+	struct smol2d_rect rect;
+	unsigned int i;
+
+	if (tex != &be->backbuffer.tex)
+		return;
+
+	/* the same clipping the fills do, so this is what really got painted */
+	if (x < 0) {
+		if ((unsigned int)-x >= w)
+			return;
+		w -= (unsigned int)-x;
+		x = 0;
+	}
+
+	if (y < 0) {
+		if ((unsigned int)-y >= h)
+			return;
+		h -= (unsigned int)-y;
+		y = 0;
+	}
+
+	if (!w || !h ||
+	    (unsigned int)x >= be->backbuffer.tex.w || (unsigned int)y >= be->backbuffer.tex.h)
+		return;
+
+	if (w > be->backbuffer.tex.w - (unsigned int)x)
+		w = be->backbuffer.tex.w - (unsigned int)x;
+	if (h > be->backbuffer.tex.h - (unsigned int)y)
+		h = be->backbuffer.tex.h - (unsigned int)y;
+
+	rect.x = x;
+	rect.y = y;
+	rect.w = w;
+	rect.h = h;
+
+	for (i = 0; i < NBUFFERS; i++) {
+		struct damage *d = &be->damage[i];
+
+		if (d->all)
+			continue;
+
+		if (d->n == MAXDAMAGE)
+			coalesce(d, MAXDAMAGE / 2);
+
+		d->rects[d->n++] = rect;
+		d->area += (unsigned long)w * h;
+
+		/*
+		 * Once the pieces add up to the screen there is nothing left to
+		 * save, and scattered drawing merges into boxes that cover more
+		 * than they hold, so stop counting and take the whole thing.
+		 */
+		if (d->area >= (unsigned long)be->backbuffer.tex.w * be->backbuffer.tex.h) {
+			d->all = true;
+			d->n = 0;
+			d->area = 0;
+		}
+	}
+}
+
 int smol2d_init(void **backend_cntx, enum smol2d_colourspace cs)
 {
 	struct drm_mode_card_res __smoldrm_cleanup_resources res = { 0 };
@@ -137,6 +268,9 @@ int smol2d_init(void **backend_cntx, enum smol2d_colourspace cs)
 	be->backbuffer.pixels = calloc((size_t)be->backbuffer.tex.w, be->backbuffer.tex.h);
 	if (!be->backbuffer.pixels)
 		goto err_buffers;
+
+	/* none of the buffers has anything of ours in it yet */
+	damaged(be, &be->backbuffer.tex, 0, 0, be->backbuffer.tex.w, be->backbuffer.tex.h);
 
 	*backend_cntx = be;
 	return 0;
@@ -310,6 +444,7 @@ int smol2d_tex_clear(void *backend_cntx, struct smol2d_tex *tex, const struct sm
 	if (!be->hasclip && !be->mask) {
 		memset(drmtex->pixels, colour->indexed.index,
 		       (size_t)drmtex->tex.w * drmtex->tex.h);
+		damaged(be, tex, 0, 0, drmtex->tex.w, drmtex->tex.h);
 		return 0;
 	}
 
@@ -317,6 +452,7 @@ int smol2d_tex_clear(void *backend_cntx, struct smol2d_tex *tex, const struct sm
 		smol2d_c8_fill_masked(drmtex->pixels, drmtex->tex.w, drmtex->tex.h,
 				      drmtex->tex.w, 0, 0, drmtex->tex.w, drmtex->tex.h,
 				      colour->indexed.index, be->mask);
+		damaged(be, tex, 0, 0, drmtex->tex.w, drmtex->tex.h);
 		return 0;
 	}
 
@@ -324,6 +460,7 @@ int smol2d_tex_clear(void *backend_cntx, struct smol2d_tex *tex, const struct sm
 			      drmtex->tex.w, be->clip.x, be->clip.y,
 			      be->clip.w, be->clip.h,
 			      colour->indexed.index, be->mask);
+	damaged(be, tex, be->clip.x, be->clip.y, be->clip.w, be->clip.h);
 
 	return 0;
 }
@@ -344,10 +481,11 @@ int smol2d_tex_setkey(void *backend_cntx, struct smol2d_tex *tex, int key)
 
 int smol2d_tex_renderto(void *backend_cntx, struct smol2d_tex *tex, struct smol2d_drawlist *drawlist)
 {
+	struct drm_backend *be = backend_cntx;
 	struct drm_tex *drmtex = (struct drm_tex *)tex;
 	unsigned int i;
 
-	if (!backend_cntx || !drmtex || !drawlist)
+	if (!be || !drmtex || !drawlist)
 		return -1;
 
 	for (i = 0; i < drawlist->nsprites; i++) {
@@ -361,6 +499,7 @@ int smol2d_tex_renderto(void *backend_cntx, struct smol2d_tex *tex, struct smol2
 		smol2d_c8_blit(drmtex->pixels, drmtex->tex.w, drmtex->tex.h,
 			       from->pixels, from->tex.w, from->tex.h,
 			       sprite->x, sprite->y, from->key);
+		damaged(be, tex, sprite->x, sprite->y, from->tex.w, from->tex.h);
 	}
 
 	return 0;
@@ -488,9 +627,10 @@ struct smol2d_op *smol2d_pipeline_params(struct smol2d_pipeline *pipeline, unsig
 
 int smol2d_pipeline_run(void *backend_cntx, struct smol2d_pipeline *pipeline)
 {
+	struct drm_backend *be = backend_cntx;
 	unsigned int i;
 
-	if (!backend_cntx || !pipeline)
+	if (!be || !pipeline)
 		return -1;
 
 	for (i = 0; i < pipeline->nops; i++) {
@@ -504,6 +644,8 @@ int smol2d_pipeline_run(void *backend_cntx, struct smol2d_pipeline *pipeline)
 			       op->fill.rect.x, op->fill.rect.y,
 			       op->fill.rect.w, op->fill.rect.h,
 			       op->fill.colour.indexed.index);
+		damaged(be, op->dst, op->fill.rect.x, op->fill.rect.y,
+			op->fill.rect.w, op->fill.rect.h);
 	}
 
 	return 0;
@@ -521,18 +663,94 @@ void smol2d_pipeline_destroy(void *backend_cntx, struct smol2d_pipeline *pipelin
 	free(pipeline);
 }
 
+/* Only what changed goes over, which on a slow bus is most of the frame time */
+static void flush(struct drm_backend *be, struct smoldrm_dumbbuffer *buffer,
+		  const struct damage *d)
+{
+	unsigned int pitch = SMOLDRM_DUMBBUFFER_PITCH(buffer);
+	unsigned int stride = be->backbuffer.tex.w;
+	unsigned int i, row;
+
+	if (d->all) {
+		smol2d_c8_copy(buffer->mapped, pitch, be->backbuffer.pixels,
+			       be->backbuffer.tex.w, be->backbuffer.tex.h);
+		return;
+	}
+
+	for (i = 0; i < d->n; i++) {
+		const struct smol2d_rect *r = &d->rects[i];
+		uint8_t *to = (uint8_t *)buffer->mapped +
+			      (size_t)r->y * pitch + (unsigned int)r->x;
+		const uint8_t *from = be->backbuffer.pixels +
+				      (size_t)r->y * stride + (unsigned int)r->x;
+
+		if (r->w == 1) {
+			for (row = 0; row < r->h; row++, to += pitch, from += stride)
+				*to = *from;
+			continue;
+		}
+
+		for (row = 0; row < r->h; row++, to += pitch, from += stride)
+			memcpy(to, from, r->w);
+	}
+}
+
+/*
+ * Hand the kernel the same rectangles. Drivers that keep the screen in their
+ * own memory copy only these instead of the lot; the ones that scan out of our
+ * buffer directly have no dirty handler at all and the ioctl comes back as
+ * ENOSYS, so ask once and take the answer.
+ */
+static void hint(struct drm_backend *be, uint32_t fbid, const struct damage *d)
+{
+	struct drm_clip_rect clips[MAXDAMAGE];
+	struct drm_mode_fb_dirty_cmd dirty = { 0 };
+	unsigned int i;
+
+	if (be->nodirty || (!d->n && !d->all))
+		return;
+
+	if (d->all) {
+		clips[0].x1 = 0;
+		clips[0].y1 = 0;
+		clips[0].x2 = (unsigned short)be->backbuffer.tex.w;
+		clips[0].y2 = (unsigned short)be->backbuffer.tex.h;
+	}
+
+	for (i = 0; !d->all && i < d->n; i++) {
+		const struct smol2d_rect *r = &d->rects[i];
+
+		clips[i].x1 = (unsigned short)r->x;
+		clips[i].y1 = (unsigned short)r->y;
+		clips[i].x2 = (unsigned short)(r->x + (int)r->w);
+		clips[i].y2 = (unsigned short)(r->y + (int)r->h);
+	}
+
+	dirty.fb_id = fbid;
+	dirty.num_clips = d->all ? 1 : d->n;
+	dirty.clips_ptr = SMOLDRM_CAST_TO_DRM_PTR(clips);
+
+	if (ioctl(be->card, DRM_IOCTL_MODE_DIRTYFB, &dirty))
+		be->nodirty = true;
+}
+
 int smol2d_present(void *backend_cntx)
 {
 	struct drm_backend *be = backend_cntx;
 	struct smoldrm_dumbbuffer *buffer;
+	struct damage *d;
 
 	if (!be)
 		return -1;
 
 	buffer = &be->buffers[be->back];
+	d = &be->damage[be->back];
 
-	smol2d_c8_copy(buffer->mapped, SMOLDRM_DUMBBUFFER_PITCH(buffer),
-		       be->backbuffer.pixels, be->backbuffer.tex.w, be->backbuffer.tex.h);
+	flush(be, buffer, d);
+	hint(be, buffer->fbid, d);
+	d->n = 0;
+	d->area = 0;
+	d->all = false;
 
 	smoldrm_waitforvblank(be->card);
 
