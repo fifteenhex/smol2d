@@ -36,6 +36,8 @@ struct drm_backend {
 	unsigned int back;
 	unsigned int front;	/* the one being scanned out */
 	bool canflip;
+	bool novblank;
+	bool verbose;
 	uint32_t palette[256];
 	struct drm_tex backbuffer;
 	struct smol2d_rect clip;
@@ -131,7 +133,19 @@ int smol2d_init(void **backend_cntx, enum smol2d_colourspace cs)
 
 	be->back = 1;
 	be->front = 0;
-	be->canflip = true;
+
+	/*
+	 * Knobs for working out where a present goes on hardware that cannot be
+	 * watched any other way. Waiting for the vblank and flipping are the
+	 * two things it does besides the copy, and each can be turned off on
+	 * its own, so the difference says which one costs.
+	 */
+	be->canflip = !getenv("SMOL2D_DRM_NOFLIP");
+	be->novblank = getenv("SMOL2D_DRM_NOVBLANK") != NULL;
+	be->verbose = getenv("SMOL2D_DRM_VERBOSE") != NULL;
+
+	if (!be->canflip)
+		be->back = 0;
 
 	be->backbuffer.tex.w = be->mode.hdisplay;
 	be->backbuffer.tex.h = be->mode.vdisplay;
@@ -140,6 +154,12 @@ int smol2d_init(void **backend_cntx, enum smol2d_colourspace cs)
 	be->backbuffer.pixels = calloc((size_t)be->backbuffer.tex.w, be->backbuffer.tex.h);
 	if (!be->backbuffer.pixels)
 		goto err_buffers;
+
+	if (be->verbose)
+		printf("smol2d: %ux%u at %uHz, %u buffers, flipping %s, vblank wait %s\n",
+		       be->mode.hdisplay, be->mode.vdisplay, be->mode.vrefresh,
+		       NBUFFERS, be->canflip ? "on" : "off",
+		       be->novblank ? "off" : "on");
 
 	*backend_cntx = be;
 	return 0;
@@ -537,6 +557,10 @@ static void nomoreflipping(struct drm_backend *be)
 	be->canflip = false;
 	be->back = be->front;
 
+	if (be->verbose)
+		printf("smol2d: the page flip was refused, so every frame would have\n"
+		       "smol2d: been a modeset. Drawing into the buffer on screen instead.\n");
+
 	fprintf(stderr,
 		"smol2d: this driver will not page flip, so drawing straight into\n"
 		"smol2d: the buffer on screen from now on. Expect tearing, not a\n"
@@ -557,7 +581,8 @@ int smol2d_present(void *backend_cntx)
 		       be->backbuffer.pixels, be->backbuffer.tex.w, be->backbuffer.tex.h);
 
 	if (be->canflip) {
-		smoldrm_waitforvblank(be->card);
+		if (!be->novblank)
+			smoldrm_waitforvblank(be->card);
 
 		if (smoldrm_pageflip(be->card, be->crtc_id, buffer->fbid)) {
 			nomoreflipping(be);
