@@ -15,9 +15,11 @@
  */
 
 #ifndef NOLIBC
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #endif
 
 #include <smol2d.h>
@@ -32,6 +34,76 @@
 #define COLUMNS		256	/* one pixel wide fills, the shape of the wave */
 #define BAND		48	/* how tall a piece of it moves in a frame */
 
+/*
+ * move16 moves a cache line at a time and does not read the line it is about
+ * to overwrite, which is the thing a fill otherwise pays for. It is a 68040
+ * and 68060 instruction, so it is asked for by name with .chip and only run
+ * after the machine says it has one -- a 68030 would take an exception.
+ *
+ * The shapes are the kernel's, out of arch/m68k: copying is both ends
+ * stepping, and filling is the same instruction with the source pinned to the
+ * first line, which has been written by hand, and rewound every time.
+ */
+#ifdef __m68k__
+#define MOVE16	1
+
+static int has_move16(void)
+{
+	char buf[1024];
+	int fd, got, i;
+
+	fd = open("/proc/cpuinfo", 0 /* O_RDONLY */);
+	if (fd < 0)
+		return 0;
+
+	got = (int)read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+
+	if (got <= 0)
+		return 0;
+
+	buf[got] = 0;
+
+	for (i = 0; i + 5 < got; i++)
+		if (!memcmp(buf + i, "68040", 5) || !memcmp(buf + i, "68060", 5))
+			return 1;
+
+	return 0;
+}
+
+static void move16_copy(void *to, void *from, unsigned long lines)
+{
+	__asm__ __volatile__("1:\t"
+			     ".chip 68040\n\t"
+			     "move16 %1@+,%0@+\n\t"
+			     ".chip 68k\n\t"
+			     "subql #1,%2\n\t"
+			     "bnes 1b"
+			     : "=a" (to), "=a" (from), "=d" (lines)
+			     : "0" (to), "1" (from), "2" (lines)
+			     : "memory");
+}
+
+/* the first line has to hold the pattern before this is called */
+static void move16_fill(void *at, unsigned long lines)
+{
+	void *src = at;
+	void *dst = (uint8_t *)at + 16;
+
+	__asm__ __volatile__("1:\t"
+			     ".chip 68040\n\t"
+			     "move16 %2@+,%0@+\n\t"
+			     ".chip 68k\n\t"
+			     "subqw #8,%2\n\t"
+			     "subqw #8,%2\n\t"
+			     "subql #1,%1\n\t"
+			     "bnes 1b"
+			     : "=a" (dst), "=d" (lines), "=a" (src)
+			     : "0" (dst), "1" (lines), "2" (src)
+			     : "memory");
+}
+#endif
+
 static void *cntx;
 static struct smol2d_tex *backbuffer, *sprite;
 static struct smol2d_mask *mask;
@@ -39,6 +111,8 @@ static struct smol2d_sprite sprites[NSPRITES];
 static struct smol2d_sprite *spritelist[NSPRITES];
 static struct smol2d_drawlist drawlist;
 static uint8_t *from, *to;
+static uint8_t *lined_from, *lined_to;	/* the same, on a 16 byte line */
+static unsigned long lines;
 static unsigned int width, height;
 static unsigned long screen;
 
@@ -126,6 +200,24 @@ static void b_widecopy(void)
 {
 	smol2d_c8_copyrun(to, from, screen);
 }
+
+#ifdef MOVE16
+static void b_move16fill(void)
+{
+	/* the pattern line is also the source, and a copy run may have eaten it */
+	((uint32_t *)lined_to)[0] = 0x03030303;
+	((uint32_t *)lined_to)[1] = 0x03030303;
+	((uint32_t *)lined_to)[2] = 0x03030303;
+	((uint32_t *)lined_to)[3] = 0x03030303;
+
+	move16_fill(lined_to, lines - 1);
+}
+
+static void b_move16copy(void)
+{
+	move16_copy(lined_to, lined_from, lines);
+}
+#endif
 
 /* what it costs to ask the time, which pacing does every frame */
 static void b_getticks(void)
@@ -261,14 +353,22 @@ static int makethings(void)
 	if (smol2d_setpalette(cntx, &palette))
 		return -1;
 
-	from = malloc(screen);
-	to = malloc(screen);
+	from = malloc(screen + 32);
+	to = malloc(screen + 32);
 	pixels = malloc((size_t)SPRITEW * SPRITEH);
 	if (!from || !to || !pixels)
 		return -1;
 
 	memset(from, 7, screen);
 	memset(to, 0, screen);
+
+	/* move16 works on whole cache lines, from a line boundary */
+	lined_from = (uint8_t *)(((uintptr_t)from + 15) & ~(uintptr_t)15);
+	lined_to = (uint8_t *)(((uintptr_t)to + 15) & ~(uintptr_t)15);
+	lines = screen / 16;
+
+	for (i = 0; i < 16; i++)
+		lined_to[i] = 3;
 
 	/* a quarter of it transparent, so a colour key has something to skip */
 	for (i = 0; i < SPRITEW * SPRITEH; i++)
@@ -391,6 +491,17 @@ int main(void)
 	timeit("memcpy a screen (the libc)", screen, b_memcpy);
 	timeit("fill a screen, 32 bits at a time", screen, b_widefill);
 	timeit("copy a screen, 32 bits at a time", screen, b_widecopy);
+
+#ifdef MOVE16
+	if (has_move16()) {
+		timeit("fill a screen with move16", lines * 16, b_move16fill);
+		timeit("copy a screen with move16", lines * 16, b_move16copy);
+	} else {
+		printf("  %-34s %8s %12s %10s\n", "move16", "-", "-", "no 68040");
+	}
+#else
+	printf("  %-34s %8s %12s %10s\n", "move16", "-", "-", "not m68k");
+#endif
 	timeit("ask the time", 0, b_getticks);
 
 	timeit("clear the screen", screen, b_clear);
