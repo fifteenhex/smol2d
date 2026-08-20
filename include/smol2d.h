@@ -133,6 +133,99 @@ void smol2d_close(void *backend_cntx);
 
 /* Helpers */
 
+/*
+ * Filling and copying runs of pixels.
+ *
+ * nolibc's memset is a byte at a time with an asm barrier in the loop to stop
+ * the compiler making anything of it, and its memcpy and memmove are the same.
+ * On a 68040 that is the slowest part of a frame by a long way: a screen's
+ * worth measures about a megabyte a second, which is a couple of frames a
+ * second before anything has been drawn.
+ *
+ * So under nolibc these go a long at a time, after squaring up the alignment,
+ * which is four times fewer bus cycles on a 32 bit machine. With a real libc
+ * they are memset and memcpy, which will be better than anything written here.
+ */
+static inline void smol2d_c8_set(uint8_t *at, uint8_t value, unsigned int n)
+{
+#ifdef NOLIBC
+	uint32_t wide = value;
+
+	wide |= wide << 8;
+	wide |= wide << 16;
+
+	while (n && ((uintptr_t)at & 3)) {
+		*at++ = value;
+		n--;
+	}
+
+	while (n >= 16) {
+		((uint32_t *)at)[0] = wide;
+		((uint32_t *)at)[1] = wide;
+		((uint32_t *)at)[2] = wide;
+		((uint32_t *)at)[3] = wide;
+		at += 16;
+		n -= 16;
+	}
+
+	while (n >= 4) {
+		*(uint32_t *)at = wide;
+		at += 4;
+		n -= 4;
+	}
+
+	while (n--)
+		*at++ = value;
+#else
+	memset(at, value, n);
+#endif
+}
+
+static inline void smol2d_c8_copyrun(uint8_t *to, const uint8_t *from, unsigned int n)
+{
+#ifdef NOLIBC
+	/*
+	 * Only worth widening when both ends can be, which is the usual case:
+	 * rows of a texture and rows of a scanout buffer are both aligned, and
+	 * their widths and pitches are multiples of four. Anything else goes a
+	 * byte at a time rather than reading and writing across the grain.
+	 */
+	if (((uintptr_t)to ^ (uintptr_t)from) & 3) {
+		while (n--)
+			*to++ = *from++;
+
+		return;
+	}
+
+	while (n && ((uintptr_t)to & 3)) {
+		*to++ = *from++;
+		n--;
+	}
+
+	while (n >= 16) {
+		((uint32_t *)to)[0] = ((const uint32_t *)from)[0];
+		((uint32_t *)to)[1] = ((const uint32_t *)from)[1];
+		((uint32_t *)to)[2] = ((const uint32_t *)from)[2];
+		((uint32_t *)to)[3] = ((const uint32_t *)from)[3];
+		to += 16;
+		from += 16;
+		n -= 16;
+	}
+
+	while (n >= 4) {
+		*(uint32_t *)to = *(const uint32_t *)from;
+		to += 4;
+		from += 4;
+		n -= 4;
+	}
+
+	while (n--)
+		*to++ = *from++;
+#else
+	memcpy(to, from, n);
+#endif
+}
+
 static inline void smol2d_c8_blit(uint8_t *dst, unsigned int dstw, unsigned int dsth,
 				  const uint8_t *src, unsigned int srcw, unsigned int srch,
 				  unsigned int x, unsigned int y, int key)
@@ -150,7 +243,7 @@ static inline void smol2d_c8_blit(uint8_t *dst, unsigned int dstw, unsigned int 
 		uint8_t *to = dst + (size_t)(y + row) * dstw + x;
 
 		if (key < 0) {
-			memcpy(to, from, w);
+			smol2d_c8_copyrun(to, from, w);
 			continue;
 		}
 
@@ -213,7 +306,7 @@ static inline void smol2d_c8_fill_masked(uint8_t *dst, unsigned int dstw, unsign
 		uint8_t *to = dst + (size_t)dy * dststride + (unsigned int)x;
 
 		if (!mask) {
-			memset(to, index, w);
+			smol2d_c8_set(to, index, w);
 			continue;
 		}
 
@@ -237,8 +330,8 @@ static inline void smol2d_c8_copy(void *dst, unsigned int dstpitch,
 	unsigned int row;
 
 	for (row = 0; row < h; row++)
-		memcpy((uint8_t *)dst + (size_t)row * dstpitch,
-		       src + (size_t)row * w, w);
+		smol2d_c8_copyrun((uint8_t *)dst + (size_t)row * dstpitch,
+				  src + (size_t)row * w, w);
 }
 
 #endif /* __SMOL2D_H */

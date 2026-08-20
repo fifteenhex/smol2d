@@ -227,7 +227,7 @@ int smol2d_tex_load(void *backend_cntx, struct smol2d_tex *tex, const uint8_t *p
 	if (!drmtex || !pixels)
 		return -1;
 
-	memcpy(drmtex->pixels, pixels, (size_t)drmtex->tex.w * drmtex->tex.h);
+	smol2d_c8_copyrun(drmtex->pixels, pixels, drmtex->tex.w * drmtex->tex.h);
 
 	return 0;
 }
@@ -308,8 +308,8 @@ int smol2d_tex_clear(void *backend_cntx, struct smol2d_tex *tex, const struct sm
 		return -1;
 
 	if (!be->hasclip && !be->mask) {
-		memset(drmtex->pixels, colour->indexed.index,
-		       (size_t)drmtex->tex.w * drmtex->tex.h);
+		smol2d_c8_set(drmtex->pixels, colour->indexed.index,
+			      drmtex->tex.w * drmtex->tex.h);
 		return 0;
 	}
 

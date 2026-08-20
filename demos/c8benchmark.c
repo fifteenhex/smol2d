@@ -106,7 +106,7 @@ static const struct result *find(const char *what)
 	return NULL;
 }
 
-/* the two the machine cannot beat */
+/* what the libc will do for a screen's worth, and what we do instead */
 static void b_memset(void)
 {
 	memset(to, 3, screen);
@@ -115,6 +115,16 @@ static void b_memset(void)
 static void b_memcpy(void)
 {
 	memcpy(to, from, screen);
+}
+
+static void b_widefill(void)
+{
+	smol2d_c8_set(to, 3, screen);
+}
+
+static void b_widecopy(void)
+{
+	smol2d_c8_copyrun(to, from, screen);
 }
 
 /* what it costs to ask the time, which pacing does every frame */
@@ -303,12 +313,23 @@ static void report(void)
 	const struct result *idle = find("present, nothing drawn");
 	const struct result *dirty = find("present, whole screen drawn");
 	const struct result *clear = find("clear the screen");
-	const struct result *copy = find("memcpy a screen (plain memory)");
+	const struct result *copy = find("copy a screen, 32 bits at a time");
+	const struct result *libcset = find("memset a screen (the libc)");
+	const struct result *wide = find("fill a screen, 32 bits at a time");
 
-	if (!idle || !dirty || !clear || !copy)
+	if (!idle || !dirty || !clear || !copy || !libcset || !wide)
 		return;
 
 	printf("\n");
+
+	/* whether the libc is the thing in the way */
+	if (wide->ns && libcset->ns > wide->ns * 3 / 2)
+		printf("  filling a screen a long at a time is %llu times quicker than the\n"
+		       "  libc's memset, so the libc is what a frame was waiting for.\n\n",
+		       libcset->ns / wide->ns);
+	else if (libcset->ns * 3 / 2 < wide->ns)
+		printf("  the libc's memset is quicker than filling a long at a time, so\n"
+		       "  leave it to the libc on this machine.\n\n");
 
 	/* what those two would come to if that was the whole frame */
 	if (idle->ns)
@@ -322,7 +343,7 @@ static void report(void)
 
 		printf("  moving the screen into the scanout buffer: about %llu us,\n",
 		       moving);
-		printf("  against %llu us to memcpy the same pixels in plain memory",
+		printf("  against %llu us to copy the same pixels in plain memory",
 		       copy->ns / 1000);
 
 		if (copy->ns && moving * 1000 > copy->ns * 2)
@@ -366,8 +387,10 @@ int main(void)
 	printf("%ux%u, %lu pixels a screen\n\n", width, height, screen);
 	printf("  %-34s %8s %12s %10s\n", "what", "times", "us each", "kpixel/s");
 
-	timeit("memset a screen (plain memory)", screen, b_memset);
-	timeit("memcpy a screen (plain memory)", screen, b_memcpy);
+	timeit("memset a screen (the libc)", screen, b_memset);
+	timeit("memcpy a screen (the libc)", screen, b_memcpy);
+	timeit("fill a screen, 32 bits at a time", screen, b_widefill);
+	timeit("copy a screen, 32 bits at a time", screen, b_widecopy);
 	timeit("ask the time", 0, b_getticks);
 
 	timeit("clear the screen", screen, b_clear);
