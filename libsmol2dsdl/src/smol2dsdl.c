@@ -24,6 +24,13 @@ struct sdl_backend {
 	Uint64 period;
 	Uint64 nextframe;
 	bool closing;
+
+	/* keys that have happened and not been asked for yet */
+	struct {
+		enum smol2d_key key;
+		int down;
+	} keys[32];
+	unsigned int head, tail;
 	struct show *show;
 };
 
@@ -372,6 +379,47 @@ int smol2d_tex_renderto(void *backend_cntx, struct smol2d_tex *tex, struct smol2
 	return 0;
 }
 
+/* the few a game names, out of everything SDL can report */
+static enum smol2d_key whichkey(SDL_Keycode code)
+{
+	switch (code) {
+	case SDLK_SPACE:
+		return SMOL2D_KEY_SPACE;
+	case SDLK_UP:
+		return SMOL2D_KEY_UP;
+	case SDLK_DOWN:
+		return SMOL2D_KEY_DOWN;
+	case SDLK_LEFT:
+		return SMOL2D_KEY_LEFT;
+	case SDLK_RIGHT:
+		return SMOL2D_KEY_RIGHT;
+	case SDLK_RETURN:
+	case SDLK_KP_ENTER:
+		return SMOL2D_KEY_ENTER;
+	case SDLK_ESCAPE:
+		return SMOL2D_KEY_ESC;
+	default:
+		return SMOL2D_KEY_OTHER;
+	}
+}
+
+/*
+ * Events arrive when SDL feels like handing them over, which is not when the
+ * app asks, so they wait here until it does. The oldest goes first, and if the
+ * app is not keeping up the oldest is what gets dropped.
+ */
+static void remember(struct sdl_backend *be, const SDL_Event *event)
+{
+	unsigned int next = (be->head + 1) % SDL_arraysize(be->keys);
+
+	be->keys[be->head].key = whichkey(event->key.key);
+	be->keys[be->head].down = event->type == SDL_EVENT_KEY_DOWN;
+	be->head = next;
+
+	if (be->head == be->tail)
+		be->tail = (be->tail + 1) % SDL_arraysize(be->keys);
+}
+
 static bool takeevent(struct sdl_backend *be, const SDL_Event *event)
 {
 	/* show's own keys, and its window closing, are not the app's business */
@@ -381,6 +429,11 @@ static bool takeevent(struct sdl_backend *be, const SDL_Event *event)
 	if (event->type == SDL_EVENT_QUIT ||
 	    event->type == SDL_EVENT_WINDOW_CLOSE_REQUESTED)
 		be->closing = true;
+
+	if (event->type != SDL_EVENT_KEY_DOWN && event->type != SDL_EVENT_KEY_UP)
+		return false;
+
+	remember(be, event);
 
 	if (event->type != SDL_EVENT_KEY_DOWN)
 		return false;
@@ -641,6 +694,25 @@ int smol2d_waitkey(void *backend_cntx, unsigned int timeout)
 	}
 
 	return 0;
+}
+
+int smol2d_getkey(void *backend_cntx, enum smol2d_key *key, int *down)
+{
+	struct sdl_backend *be = backend_cntx;
+
+	if (!be || !key || !down)
+		return -1;
+
+	drainevents(be);
+
+	if (be->tail == be->head)
+		return 0;
+
+	*key = be->keys[be->tail].key;
+	*down = be->keys[be->tail].down;
+	be->tail = (be->tail + 1) % SDL_arraysize(be->keys);
+
+	return 1;
 }
 
 uint64_t smol2d_getticks(void *backend_cntx)
