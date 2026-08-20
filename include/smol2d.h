@@ -158,6 +158,29 @@ uint64_t smol2d_getticks(void *backend_cntx);
 
 int smol2d_setframerate(void *backend_cntx, unsigned int fps);
 
+/*
+ * Keys, as far as a game is concerned. The backends know them by different
+ * numbers -- one reads a linux input device, the other asks SDL -- so this is
+ * the small set that both can name and that a demo actually uses.
+ */
+enum smol2d_key {
+	SMOL2D_KEY_OTHER = 0,
+	SMOL2D_KEY_SPACE,
+	SMOL2D_KEY_UP,
+	SMOL2D_KEY_DOWN,
+	SMOL2D_KEY_LEFT,
+	SMOL2D_KEY_RIGHT,
+	SMOL2D_KEY_ENTER,
+	SMOL2D_KEY_ESC,
+};
+
+/*
+ * The next key that was pressed or let go: 1 if there was one, 0 if not.
+ * Keys the list above has no name for come back as SMOL2D_KEY_OTHER rather
+ * than being dropped, so waiting for "any key" still works.
+ */
+int smol2d_getkey(void *backend_cntx, enum smol2d_key *key, int *down);
+
 /* 0 == non-blocking  */
 int smol2d_waitkey(void *backend_cntx, unsigned int timeout);
 

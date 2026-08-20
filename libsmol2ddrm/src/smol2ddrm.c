@@ -3,6 +3,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -15,6 +16,7 @@
 #endif
 
 #include <smoldrm.h>
+#include <smolinput.h>
 
 #include <smol2d.h>
 
@@ -63,6 +65,10 @@ struct drm_backend {
 	uint64_t start;
 	uint64_t period;
 	uint64_t nextframe;
+
+	struct smolinput_keyboard keyboard;
+	bool haskeyboard;
+	bool grabbed;
 };
 
 static int findoutput(int card, struct drm_mode_card_res *res,
@@ -505,12 +511,71 @@ int smol2d_tex_renderto(void *backend_cntx, struct smol2d_tex *tex, struct smol2
 	return 0;
 }
 
-/* stub */
+/* the few a game names, out of the hundreds an input device can send */
+static enum smol2d_key whichkey(uint16_t code)
+{
+	switch (code) {
+	case KEY_SPACE:
+		return SMOL2D_KEY_SPACE;
+	case KEY_UP:
+		return SMOL2D_KEY_UP;
+	case KEY_DOWN:
+		return SMOL2D_KEY_DOWN;
+	case KEY_LEFT:
+		return SMOL2D_KEY_LEFT;
+	case KEY_RIGHT:
+		return SMOL2D_KEY_RIGHT;
+	case KEY_ENTER:
+	case KEY_KPENTER:
+		return SMOL2D_KEY_ENTER;
+	case KEY_ESC:
+		return SMOL2D_KEY_ESC;
+	default:
+		return SMOL2D_KEY_OTHER;
+	}
+}
+
+int smol2d_getkey(void *backend_cntx, enum smol2d_key *key, int *down)
+{
+	struct drm_backend *be = backend_cntx;
+	struct smolinput_key got;
+	int ret;
+
+	if (!be || !key || !down)
+		return -1;
+
+	if (!be->haskeyboard)
+		return 0;
+
+	ret = smolinput_readkey(&be->keyboard, &got);
+	if (ret <= 0)
+		return ret;
+
+	/* a key that repeats has not been let go, so it is still down */
+	*key = whichkey(got.code);
+	*down = got.state != SMOLINPUT_RELEASED;
+
+	return 1;
+}
+
 int smol2d_waitkey(void *backend_cntx, unsigned int timeout)
 {
-	(void)timeout;
+	struct drm_backend *be = backend_cntx;
+	struct smolinput_key got;
+	int ret;
 
-	return backend_cntx ? 0 : -1;
+	if (!be)
+		return -1;
+
+	if (!be->haskeyboard)
+		return 0;
+
+	ret = smolinput_waitkey(&be->keyboard, &got, timeout ? (int)timeout : 0);
+	if (ret <= 0)
+		return ret;
+
+	/* only a press counts, or letting go of the key that got here counts */
+	return got.state == SMOLINPUT_PRESSED;
 }
 
 uint64_t smol2d_getticks(void *backend_cntx)
@@ -839,6 +904,13 @@ void smol2d_close(void *backend_cntx)
 
 	if (!be)
 		return;
+
+	if (be->haskeyboard) {
+		if (be->grabbed)
+			smolinput_grab(&be->keyboard, 0);
+
+		smolinput_close(&be->keyboard);
+	}
 
 	for (i = 0; i < NBUFFERS; i++)
 		smoldrm_cleanupdumbbuffer(&be->buffers[i]);

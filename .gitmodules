@@ -4,3 +4,6 @@
 [submodule "fbdevgl"]
 	path = fbdevgl
 	url = https://github.com/fifteenhex/fbdevgl.git
+[submodule "smolinput"]
+	path = smolinput
+	url = https://github.com/fifteenhex/smolinput.git

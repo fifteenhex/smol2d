@@ -1,7 +1,7 @@
 include ../toolchain.mk
 include ../nolibc.mk
 
-CFLAGS += -I../include -I../smoldrm -O2
+CFLAGS += -I../include -I../smoldrm -I../smolinput -O2
 
 ARCHIVES = libsmol2ddrm.a
 
@@ -16,12 +16,12 @@ all: $(ARCHIVES)
 libsmol2ddrm.a: src/smol2ddrm.o
 	$(AR) rcs $@ $^
 
-src/smol2ddrm.o: src/smol2ddrm.c ../smoldrm/smoldrm.h
+src/smol2ddrm.o: src/smol2ddrm.c ../smoldrm/smoldrm.h ../smolinput/smolinput.h
 
 $(NOLIBC_ARCHIVE): src/smol2ddrm_nolibc.o
 	$(AR) rcs $@ $^
 
-src/smol2ddrm_nolibc.o: src/smol2ddrm.c ../smoldrm/smoldrm.h
+src/smol2ddrm_nolibc.o: src/smol2ddrm.c ../smoldrm/smoldrm.h ../smolinput/smolinput.h
 	$(CC) $(NOLIBC_CFLAGS) $(CFLAGS) -c -o $@ $<
 
 clean:
