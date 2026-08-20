@@ -6,6 +6,10 @@ SDL_LIBS = $(shell $(PKG_CONFIG) --libs sdl3)
 DRM_BACKEND = ../libsmol2ddrm/libsmol2ddrm.a
 DRM_BACKEND_NOLIBC = ../libsmol2ddrm/libsmol2ddrm_nolibc.a
 
+# the backends are built -O2, and a demo that is not gets half the speed of
+# the same header code compiled into them
+CFLAGS += -I../include -O2 -Wall
+
 SOURCES = $(wildcard *.c)
 SDL_DEMOS = $(patsubst %.c,%_sdl,$(SOURCES))
 DRM_DEMOS = $(patsubst %.c,%_drm,$(SOURCES))
@@ -24,14 +28,14 @@ endif
 all: $(DEMOS)
 
 %_sdl: %.c $(SDL_BACKEND)
-	$(CC) -I ../include -o $@ $^ $(SDL_LIBS) -lm
+	$(CC) $(CFLAGS) -o $@ $^ $(SDL_LIBS) -lm
 
 %_drm: %.c $(DRM_BACKEND)
-	$(CC) -I ../include -o $@ $^ -lm
+	$(CC) $(CFLAGS) -o $@ $^ -lm
 
 ifdef NOLIBCDIR
 %_drm_nolibc: %.c $(DRM_BACKEND_NOLIBC)
-	$(CC) $(NOLIBC_CFLAGS) $(NOLIBC_LDFLAGS) -I ../include -o $@ $^ -lgcc
+	$(CC) $(NOLIBC_CFLAGS) $(NOLIBC_LDFLAGS) $(CFLAGS) -o $@ $^ -lgcc
 endif
 
 clean:

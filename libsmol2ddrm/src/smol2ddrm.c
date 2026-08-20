@@ -34,6 +34,7 @@ struct drm_backend {
 	struct drm_mode_modeinfo mode;
 	struct smoldrm_dumbbuffer buffers[NBUFFERS];
 	unsigned int back;
+	unsigned int front;	/* the one being scanned out */
 	bool canflip;
 	uint32_t palette[256];
 	struct drm_tex backbuffer;
@@ -129,6 +130,8 @@ int smol2d_init(void **backend_cntx, enum smol2d_colourspace cs)
 		goto err_buffers;
 
 	be->back = 1;
+	be->front = 0;
+	be->canflip = true;
 
 	be->backbuffer.tex.w = be->mode.hdisplay;
 	be->backbuffer.tex.h = be->mode.vdisplay;
@@ -521,6 +524,25 @@ void smol2d_pipeline_destroy(void *backend_cntx, struct smol2d_pipeline *pipelin
 	free(pipeline);
 }
 
+/*
+ * A driver that will not flip used to get a full modeset instead, once a
+ * frame, which on e17 is a tenth of a second whether or not anything was
+ * drawn. Nothing about that is better than not flipping at all: the buffer on
+ * screen can be drawn into directly, which is what every machine did before
+ * page flipping existed. So the first refusal is the last one asked for, and
+ * from then on there is one buffer and it is the one being scanned out.
+ */
+static void nomoreflipping(struct drm_backend *be)
+{
+	be->canflip = false;
+	be->back = be->front;
+
+	fprintf(stderr,
+		"smol2d: this driver will not page flip, so drawing straight into\n"
+		"smol2d: the buffer on screen from now on. Expect tearing, not a\n"
+		"smol2d: modeset a frame.\n");
+}
+
 int smol2d_present(void *backend_cntx)
 {
 	struct drm_backend *be = backend_cntx;
@@ -534,14 +556,17 @@ int smol2d_present(void *backend_cntx)
 	smol2d_c8_copy(buffer->mapped, SMOLDRM_DUMBBUFFER_PITCH(buffer),
 		       be->backbuffer.pixels, be->backbuffer.tex.w, be->backbuffer.tex.h);
 
-	smoldrm_waitforvblank(be->card);
+	if (be->canflip) {
+		smoldrm_waitforvblank(be->card);
 
-	if (smoldrm_pageflip(be->card, be->crtc_id, buffer->fbid)) {
-		if (smoldrm_attachdumbbuffertocrtc(buffer, be->conn_id, be->crtc_id, &be->mode))
-			return -1;
+		if (smoldrm_pageflip(be->card, be->crtc_id, buffer->fbid)) {
+			nomoreflipping(be);
+		} else {
+			be->front = be->back;
+			be->back = (be->back + 1) % NBUFFERS;
+		}
 	}
 
-	be->back = (be->back + 1) % NBUFFERS;
 	pace(be);
 
 	return 0;
