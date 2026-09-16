@@ -530,6 +530,21 @@ static enum smol2d_key whichkey(uint16_t code)
 		return SMOL2D_KEY_ENTER;
 	case KEY_ESC:
 		return SMOL2D_KEY_ESC;
+	case KEY_LEFTCTRL:
+	case KEY_RIGHTCTRL:
+		return SMOL2D_KEY_CTRL;
+	case KEY_LEFTSHIFT:
+	case KEY_RIGHTSHIFT:
+		return SMOL2D_KEY_SHIFT;
+	case KEY_LEFTALT:
+	case KEY_RIGHTALT:
+		return SMOL2D_KEY_ALT;
+	case KEY_TAB:
+		return SMOL2D_KEY_TAB;
+	case KEY_Y:
+		return SMOL2D_KEY_Y;
+	case KEY_N:
+		return SMOL2D_KEY_N;
 	default:
 		return SMOL2D_KEY_OTHER;
 	}

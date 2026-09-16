@@ -172,6 +172,14 @@ enum smol2d_key {
 	SMOL2D_KEY_RIGHT,
 	SMOL2D_KEY_ENTER,
 	SMOL2D_KEY_ESC,
+	/* what an action game binds: fire, run, strafe, the map, and
+	   answering the are-you-sure question */
+	SMOL2D_KEY_CTRL,
+	SMOL2D_KEY_SHIFT,
+	SMOL2D_KEY_ALT,
+	SMOL2D_KEY_TAB,
+	SMOL2D_KEY_Y,
+	SMOL2D_KEY_N,
 };
 
 /*

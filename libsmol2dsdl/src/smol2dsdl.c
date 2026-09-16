@@ -398,6 +398,21 @@ static enum smol2d_key whichkey(SDL_Keycode code)
 		return SMOL2D_KEY_ENTER;
 	case SDLK_ESCAPE:
 		return SMOL2D_KEY_ESC;
+	case SDLK_LCTRL:
+	case SDLK_RCTRL:
+		return SMOL2D_KEY_CTRL;
+	case SDLK_LSHIFT:
+	case SDLK_RSHIFT:
+		return SMOL2D_KEY_SHIFT;
+	case SDLK_LALT:
+	case SDLK_RALT:
+		return SMOL2D_KEY_ALT;
+	case SDLK_TAB:
+		return SMOL2D_KEY_TAB;
+	case SDLK_Y:
+		return SMOL2D_KEY_Y;
+	case SDLK_N:
+		return SMOL2D_KEY_N;
 	default:
 		return SMOL2D_KEY_OTHER;
 	}
