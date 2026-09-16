@@ -227,6 +227,27 @@ static void damaged(struct drm_backend *be, const struct smol2d_tex *tex,
 	}
 }
 
+/*
+ * A keyboard, if this machine has one. SMOL2D_KEYBOARD names the device to
+ * take; with nothing set smolinput scores every /dev/input/event* and picks the
+ * best, which is how a machine whose first event device is a lid switch still
+ * ends up on the thing with letters on it.
+ *
+ * Not finding one is not a failure. Plenty of what draws here has nothing to
+ * type on, and getkey() answers "nothing happened" all day without a keyboard,
+ * so a demo that only watches the clock still runs.
+ */
+static void openkeyboard(struct drm_backend *be)
+{
+	const char *path = getenv("SMOL2D_KEYBOARD");
+
+	/* set but empty is how a shell says "I did not mean anything by it" */
+	if (path && !path[0])
+		path = NULL;
+
+	be->haskeyboard = smolinput_open(&be->keyboard, path) == 0;
+}
+
 int smol2d_init(void **backend_cntx, enum smol2d_colourspace cs)
 {
 	struct drm_mode_card_res __smoldrm_cleanup_resources res = { 0 };
@@ -277,6 +298,8 @@ int smol2d_init(void **backend_cntx, enum smol2d_colourspace cs)
 
 	/* none of the buffers has anything of ours in it yet */
 	damaged(be, &be->backbuffer.tex, 0, 0, be->backbuffer.tex.w, be->backbuffer.tex.h);
+
+	openkeyboard(be);
 
 	*backend_cntx = be;
 	return 0;
