@@ -57,6 +57,12 @@ struct drm_backend {
 	unsigned int back;
 	bool canflip;
 	bool nodirty;
+	/*
+	 * No C8 scanout on this card, so the indexed surface is expanded
+	 * through `palette` on the way to a 32bpp buffer instead. See
+	 * SMOL2D_CS_C8_EMULATED.
+	 */
+	bool emulated;
 	uint32_t palette[256];
 	struct drm_tex backbuffer;
 	struct smol2d_rect clip;
@@ -362,7 +368,7 @@ int smol2d_init(void **backend_cntx, enum smol2d_colourspace cs)
 	if (!backend_cntx)
 		return -1;
 
-	if (cs != SMOL2D_CS_C8)
+	if (cs != SMOL2D_CS_C8 && cs != SMOL2D_CS_C8_EMULATED)
 		return -1;
 
 	card = smoldrm_open(findcard(cardpath, sizeof(cardpath)));
@@ -375,6 +381,19 @@ int smol2d_init(void **backend_cntx, enum smol2d_colourspace cs)
 
 	be->card = card;
 	be->start = now_ns();
+	be->emulated = (cs == SMOL2D_CS_C8_EMULATED);
+
+	/*
+	 * Until the first smol2d_setpalette() an emulated screen would expand
+	 * to all black and look broken rather than empty, so start on a grey
+	 * ramp -- which is also what a CLUT nobody has written looks like.
+	 */
+	if (be->emulated) {
+		unsigned int c;
+
+		for (c = 0; c < 256; c++)
+			be->palette[c] = ((uint32_t)c << 16) | ((uint32_t)c << 8) | c;
+	}
 
 	if (smoldrm_getresources(card, &res))
 		goto err_free;
@@ -383,7 +402,11 @@ int smol2d_init(void **backend_cntx, enum smol2d_colourspace cs)
 		goto err_free;
 
 	for (i = 0; i < NBUFFERS; i++) {
-		if (smoldrm_dumbbuffer_c8(card, &be->mode, &be->buffers[i]))
+		int ret = be->emulated
+			? smoldrm_dumbbuffer_simple(card, &be->mode, &be->buffers[i])
+			: smoldrm_dumbbuffer_c8(card, &be->mode, &be->buffers[i]);
+
+		if (ret)
 			goto err_buffers;
 	}
 
@@ -426,6 +449,21 @@ int smol2d_setpalette(void *backend_cntx, const struct smol2d_palette *palette)
 
 	if (!be || !palette)
 		return -1;
+
+	/*
+	 * A real CLUT is the scanout's business and costs nothing to change.
+	 * An emulated one is baked into the pixels already on screen, so every
+	 * buffer has to be expanded again -- which is why a game that flashes
+	 * the palette is the expensive case here and free on real C8.
+	 */
+	if (be->emulated) {
+		smol2d_c8_clut(be->palette, palette);
+
+		for (i = 0; i < NBUFFERS; i++)
+			be->damage[i].all = true;
+
+		return 0;
+	}
 
 	for (i = 0; i < SMOLDRM_CLUT_SIZE; i++) {
 		const struct smol2d_colour_chunky *c = &palette->colours[i];
@@ -946,17 +984,34 @@ static void flush(struct drm_backend *be, struct smoldrm_dumbbuffer *buffer,
 	unsigned int i, row;
 
 	if (d->all) {
-		smol2d_c8_copy(buffer->mapped, pitch, be->backbuffer.pixels,
-			       be->backbuffer.tex.w, be->backbuffer.tex.h);
+		if (be->emulated)
+			smol2d_c8_expand(buffer->mapped, pitch, be->backbuffer.pixels,
+					 stride, be->backbuffer.tex.w,
+					 be->backbuffer.tex.h, be->palette);
+		else
+			smol2d_c8_copy(buffer->mapped, pitch, be->backbuffer.pixels,
+				       be->backbuffer.tex.w, be->backbuffer.tex.h);
 		return;
 	}
 
 	for (i = 0; i < d->n; i++) {
 		const struct smol2d_rect *r = &d->rects[i];
-		uint8_t *to = (uint8_t *)buffer->mapped +
-			      (size_t)r->y * pitch + (unsigned int)r->x;
 		const uint8_t *from = be->backbuffer.pixels +
 				      (size_t)r->y * stride + (unsigned int)r->x;
+		uint8_t *to;
+
+		/* A pixel is four bytes wide when it is being expanded */
+		if (be->emulated) {
+			to = (uint8_t *)buffer->mapped +
+			     (size_t)r->y * pitch + (size_t)r->x * 4;
+
+			smol2d_c8_expand(to, pitch, from, stride, r->w, r->h,
+					 be->palette);
+			continue;
+		}
+
+		to = (uint8_t *)buffer->mapped +
+		     (size_t)r->y * pitch + (unsigned int)r->x;
 
 		if (r->w == 1) {
 			for (row = 0; row < r->h; row++, to += pitch, from += stride)

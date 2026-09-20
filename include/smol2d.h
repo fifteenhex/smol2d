@@ -75,7 +75,20 @@ enum smol2d_rop {
 
 enum smol2d_colourspace {
 	/* 8bit indexed colour */
-	SMOL2D_CS_C8
+	SMOL2D_CS_C8,
+	/*
+	 * The same 8bit indexed colour, on hardware that cannot scan it out.
+	 * C8 is a rare thing for a modern display controller to do -- a
+	 * virtio-gpu, for one, will only make you a 32bpp buffer -- so the
+	 * indexed surface is kept where it always was and expanded through the
+	 * palette on the way to the screen instead.
+	 *
+	 * Everything above this line behaves identically either way. It costs
+	 * a palette lookup and a four byte write per pixel per frame, and it
+	 * costs a real palette: changing one re-expands the screen rather than
+	 * being a CLUT write the scanout picks up for free.
+	 */
+	SMOL2D_CS_C8_EMULATED
 };
 
 /* Bring up the backend */
@@ -368,6 +381,43 @@ static inline void smol2d_c8_fill(uint8_t *dst, unsigned int dstw, unsigned int 
 				  uint8_t index)
 {
 	smol2d_c8_fill_masked(dst, dstw, dsth, dstw, x, y, w, h, index, NULL);
+}
+
+/*
+ * Indexed pixels to 32bpp, for scanning out C8 on hardware that has no C8.
+ * `clut` is 256 entries of whatever the destination wants a pixel to look
+ * like -- 0x00RRGGBB for the XRGB8888 every dumb buffer can do -- so the
+ * caller decides the format and this only does the lookup.
+ *
+ * `dstpitch` is in bytes, as a dumb buffer reports it; `srcstride` in pixels,
+ * which for an 8bit surface is the same thing.
+ */
+static inline void smol2d_c8_expand(void *dst, unsigned int dstpitch,
+				    const uint8_t *src, unsigned int srcstride,
+				    unsigned int w, unsigned int h,
+				    const uint32_t *clut)
+{
+	unsigned int row, col;
+
+	for (row = 0; row < h; row++) {
+		uint32_t *to = (uint32_t *)((uint8_t *)dst + (size_t)row * dstpitch);
+		const uint8_t *from = src + (size_t)row * srcstride;
+
+		for (col = 0; col < w; col++)
+			to[col] = clut[from[col]];
+	}
+}
+
+/* The palette in the form smol2d_c8_expand() wants, for an XRGB8888 target */
+static inline void smol2d_c8_clut(uint32_t *clut, const struct smol2d_palette *palette)
+{
+	unsigned int i;
+
+	for (i = 0; i < 256; i++) {
+		const struct smol2d_colour_chunky *c = &palette->colours[i];
+
+		clut[i] = ((uint32_t)c->r << 16) | ((uint32_t)c->g << 8) | c->b;
+	}
 }
 
 static inline void smol2d_c8_copy(void *dst, unsigned int dstpitch,
