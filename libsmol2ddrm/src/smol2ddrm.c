@@ -228,10 +228,109 @@ static void damaged(struct drm_backend *be, const struct smol2d_tex *tex,
 }
 
 /*
+ * THE SEAT
+ *
+ * smolutils gives a logged in session a "seat": a directory of the device
+ * nodes that session may use, owned by whoever logged in. The nodes under /dev
+ * belong to root, so for anybody who is not root the seat is the only way to a
+ * card or a keyboard -- and not being root is the normal case for something a
+ * person sat down and started. Without it, opening /dev/dri/card0 as a user
+ * gets EACCES and there is no display at all.
+ *
+ * SMOL_SEAT names the directory, and the nodes in it keep the names they have
+ * in /dev. None of this is required: with no seat the old paths are used,
+ * which is what a bare-metal or single-user setup wants.
+ */
+#define SMOL2D_SEAT_ENV		"SMOL_SEAT"
+#define SMOL2D_SEAT_PATH_MAX	128
+
+/* A node on the seat, if there is a seat and this is on it and we may use it */
+static const char *seatnode(char *buf, size_t len, const char *name)
+{
+	const char *seat = getenv(SMOL2D_SEAT_ENV);
+	int n;
+
+	/* set but empty is how a shell says "I did not mean anything by it" */
+	if (!seat || !seat[0])
+		return NULL;
+
+	n = snprintf(buf, len, "%s/%s", seat, name);
+	if (n < 0 || (size_t) n >= len)
+		return NULL;
+
+	if (access(buf, R_OK | W_OK))
+		return NULL;
+
+	return buf;
+}
+
+/*
+ * Which card to draw on: what SMOL2D_DRM_CARD says, else this session's seat,
+ * else nothing -- and nothing means smoldrm falls back to its own default,
+ * which is right for a machine with no seats.
+ */
+static const char *findcard(char *buf, size_t len)
+{
+	const char *path = getenv("SMOL2D_DRM_CARD");
+	unsigned int i;
+
+	if (path && path[0])
+		return path;
+
+	/* Cards are numbered from zero and a seat rarely holds more than one */
+	for (i = 0; i < 4; i++) {
+		char name[16];
+
+		snprintf(name, sizeof(name), "card%u", i);
+		if (seatnode(buf, len, name))
+			return buf;
+	}
+
+	return NULL;
+}
+
+/*
+ * The best keyboard on the seat. smolinput does this walk itself, but it does
+ * it over /dev/input, which a seated session cannot open -- so do the walk over
+ * the seat instead and hand smolinput the winner. The judging is still
+ * smolinput's; only the directory is ours, which is what keeps a seat whose
+ * first event device is a lid switch off the one with letters on it.
+ */
+static const char *seatkeyboard(char *buf, size_t len)
+{
+	char path[SMOL2D_SEAT_PATH_MAX];
+	int best = -1;
+	unsigned int i;
+
+	for (i = 0; i < SMOLINPUT_MAXDEVICES; i++) {
+		char name[16];
+		int fd, score;
+
+		snprintf(name, sizeof(name), "event%u", i);
+		if (!seatnode(path, sizeof(path), name))
+			continue;
+
+		fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+		if (fd < 0)
+			continue;
+
+		score = smolinput_scorefd(fd);
+		close(fd);
+
+		/* scorefd says "not a keyboard" with a negative number */
+		if (score > best) {
+			best = score;
+			snprintf(buf, len, "%s", path);
+		}
+	}
+
+	return best >= 0 ? buf : NULL;
+}
+
+/*
  * A keyboard, if this machine has one. SMOL2D_KEYBOARD names the device to
- * take; with nothing set smolinput scores every /dev/input/event* and picks the
- * best, which is how a machine whose first event device is a lid switch still
- * ends up on the thing with letters on it.
+ * take; failing that the seat's best, and failing that smolinput scores every
+ * /dev/input/event* and picks the winner.
  *
  * Not finding one is not a failure. Plenty of what draws here has nothing to
  * type on, and getkey() answers "nothing happened" all day without a keyboard,
@@ -239,11 +338,15 @@ static void damaged(struct drm_backend *be, const struct smol2d_tex *tex,
  */
 static void openkeyboard(struct drm_backend *be)
 {
+	char seat[SMOL2D_SEAT_PATH_MAX];
 	const char *path = getenv("SMOL2D_KEYBOARD");
 
 	/* set but empty is how a shell says "I did not mean anything by it" */
 	if (path && !path[0])
 		path = NULL;
+
+	if (!path)
+		path = seatkeyboard(seat, sizeof(seat));
 
 	be->haskeyboard = smolinput_open(&be->keyboard, path) == 0;
 }
@@ -251,6 +354,7 @@ static void openkeyboard(struct drm_backend *be)
 int smol2d_init(void **backend_cntx, enum smol2d_colourspace cs)
 {
 	struct drm_mode_card_res __smoldrm_cleanup_resources res = { 0 };
+	char cardpath[SMOL2D_SEAT_PATH_MAX];
 	struct drm_backend *be;
 	unsigned int i;
 	int card;
@@ -261,7 +365,7 @@ int smol2d_init(void **backend_cntx, enum smol2d_colourspace cs)
 	if (cs != SMOL2D_CS_C8)
 		return -1;
 
-	card = smoldrm_open(getenv("SMOL2D_DRM_CARD"));
+	card = smoldrm_open(findcard(cardpath, sizeof(cardpath)));
 	if (card < 0)
 		return -1;
 
